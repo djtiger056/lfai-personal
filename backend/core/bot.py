@@ -20,6 +20,9 @@ from ..user import user_manager
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now, from_isoformat
 from .gen_img_parser import extract_gen_img_prompt
+from .context_builder import ContextBuilder
+from .history_manager import HistoryManager
+from .user_cache import UserResourceCache
 
 
 class Bot:
@@ -32,22 +35,22 @@ class Bot:
         self.system_prompt = config.system_prompt
         self._provider_signature = None
         self._tts_signature = None
-        self.session_histories: Dict[str, List[Dict[str, str]]] = {}
-        self._history_loaded_sessions: Set[str] = set()
+        self._history_manager = HistoryManager()
+        # 向后兼容：让旧引用指向 HistoryManager 内部存储
+        self.session_histories = self._history_manager.session_histories
+        self._history_loaded_sessions = self._history_manager._history_loaded_sessions
         self.mcp_manager = MCPManager()
 
-        # 用户配置缓存
-        self._user_configs: Dict[str, Dict[str, Any]] = {}
-        self._user_config_cache_time: Dict[str, datetime] = {}
-        self._config_cache_ttl = 300  # 配置缓存有效期（秒）
-
-        # 用户级别的 LLM/TTS 实例缓存（避免每次请求都重建）
-        self._user_providers: Dict[str, Any] = {}
-        self._user_provider_signatures: Dict[str, str] = {}
-        self._user_tts_managers: Dict[str, TTSManager] = {}
-        self._user_tts_signatures: Dict[str, str] = {}
-        self._user_image_gen_managers: Dict[str, ImageGenerationManager] = {}
-        self._user_image_gen_signatures: Dict[str, str] = {}
+        # 用户资源缓存（配置、Provider、TTS、ImageGen 实例）
+        self._user_cache = UserResourceCache()
+        # 向后兼容：保留旧属性引用
+        self._user_configs = self._user_cache._user_configs
+        self._user_providers = self._user_cache._user_providers
+        self._user_provider_signatures = self._user_cache._user_provider_signatures
+        self._user_tts_managers = self._user_cache._user_tts_managers
+        self._user_tts_signatures = self._user_cache._user_tts_signatures
+        self._user_image_gen_managers = self._user_cache._user_image_gen_managers
+        self._user_image_gen_signatures = self._user_cache._user_image_gen_signatures
         self._session_last_companion_hint_turn: Dict[str, int] = {}
 
         # 存储最近生成的图片（用于API返回）
@@ -115,21 +118,13 @@ class Bot:
         # 初始化时记录提供商签名
         self._refresh_provider(force=True)
 
+        # 上下文构建器（消除 chat/chat_stream/generate_proactive_reply 中的重复逻辑）
+        self._context_builder = ContextBuilder(self)
+
     def _get_session_history(self, session_id: str, user_id: str = "default") -> List[Dict[str, str]]:
         """获取或初始化指定会话的对话历史"""
-        history = self.session_histories.get(session_id)
-        if history is None:
-            history = []
-            self.session_histories[session_id] = history
-
-        # 确保 system prompt 与当前“用户配置/全局配置”一致（支持运行时修改）
         system_prompt = self._get_user_system_prompt(user_id)
-        if system_prompt:
-            if history and history[0].get("role") == "system":
-                history[0]["content"] = system_prompt
-            else:
-                history.insert(0, {"role": "system", "content": system_prompt})
-        return history
+        return self._history_manager.get_session_history(session_id, system_prompt)
 
     def _history_limit(self) -> int:
         """获取历史记录保留上限"""
@@ -142,60 +137,23 @@ class Bot:
 
     def _trim_conversation_history(self, session_id: str, user_id: str = "default"):
         """保持对话历史在配置上限内"""
-        history = self._get_session_history(session_id, user_id)
-        limit = self._history_limit()
-        if len(history) > limit:
-            if history and history[0].get("role") == "system":
-                self.session_histories[session_id] = [history[0]] + history[-(limit - 1):]
-            else:
-                self.session_histories[session_id] = history[-limit:]
+        system_prompt = self._get_user_system_prompt(user_id)
+        self._history_manager.trim(session_id, self._history_limit(), system_prompt)
 
     async def _load_history_from_memory(self, user_id: str, session_id: Optional[str] = None):
         """从持久化存储中恢复短期对话历史，避免重启丢失上下文"""
         if not self.memory_manager:
             return
         session_id = session_id or user_id
-        if session_id in self._history_loaded_sessions:
-            return
         if not await self._ensure_memory_manager_initialized():
             return
-
-        try:
-            limit = self._history_limit()
-            memories = await self.memory_manager.get_short_term_memories(
-                user_id=user_id,
-                session_id=session_id,
-                limit=limit
-            )
-        except Exception as e:
-            print(f"[DEBUG] 恢复历史时获取短期记忆失败: {e}")
-            return
-
-        restored_history: List[Dict[str, str]] = []
-        for mem in memories:
-            message = mem.get("message") or {}
-            role = message.get("role")
-            content = message.get("content")
-            if role and content:
-                restored_message: Dict[str, Any] = {"role": role, "content": content}
-                message_ts = message.get("timestamp")
-                if message_ts:
-                    restored_message["timestamp"] = message_ts
-                restored_history.append(restored_message)
-
-        if restored_history:
-            base_history = []
-            if self.system_prompt:
-                base_history.append({"role": "system", "content": self.system_prompt})
-            self.session_histories[session_id] = base_history + restored_history
-            try:
-                state = await self.memory_manager._get_session_state(session_id, user_id)
-                state["round_count"] = len(restored_history)
-                state["updated_at"] = get_now().isoformat()
-            except Exception as e:
-                print(f"[DEBUG] 恢复记忆时更新会话状态失败: {e}")
-
-        self._history_loaded_sessions.add(session_id)
+        await self._history_manager.load_from_memory(
+            user_id=user_id,
+            session_id=session_id,
+            memory_manager=self.memory_manager,
+            system_prompt=self.system_prompt or "",
+            limit=self._history_limit(),
+        )
 
     def _refresh_provider(self, force: bool = False):
         """检测LLM配置是否变化，必要时刷新provider"""
@@ -596,158 +554,29 @@ class Bot:
             print(f"添加对话到记忆失败: {e}")
     
     async def _get_user_config(self, user_id: str) -> Dict[str, Any]:
-        """获取用户配置（带缓存）
-        
-        Args:
-            user_id: 用户ID
-            
-        Returns:
-            用户配置字典
-        """
-        # 检查缓存是否有效
-        current_time = get_now()
-        if user_id in self._user_config_cache_time:
-            cache_time = self._user_config_cache_time[user_id]
-            if (current_time - cache_time).total_seconds() < self._config_cache_ttl:
-                return self._user_configs.get(user_id, {})
-        
-        # 从数据库加载用户配置
-        user_config = {}
-        
-        # 尝试通过 QQ 用户 ID 获取用户
-        try:
-            user = await user_manager.get_user_by_qq_id(user_id)
-            if user:
-                user_config = await user_manager.get_user_config_dict(user.id)
-            else:
-                # QQ 多用户：首次接触自动建档（默认继承全局配置）
-                if str(user_id).isdigit():
-                    try:
-                        created = await user_manager.get_or_create_user_by_qq_id(str(user_id))
-                        user_config = await user_manager.get_user_config_dict(created.id)
-                        user = created
-                    except Exception as e:
-                        self.logger.warning(f"自动创建 QQ 用户失败 user_id={user_id}: {e}")
+        """获取用户配置（带缓存），委托到 UserResourceCache。"""
+        return await self._user_cache.get_user_config(user_id)
 
-                # Web 端常见：直接传 user.id（数字字符串）
-                if str(user_id).isdigit():
-                    user_by_id = await user_manager.get_user_by_id(int(user_id))
-                    if user_by_id:
-                        user_config = await user_manager.get_user_config_dict(user_by_id.id)
-        except Exception as e:
-            self.logger.warning(f"获取用户配置失败: {e}")
-        
-        # 更新缓存
-        self._user_configs[user_id] = user_config
-        self._user_config_cache_time[user_id] = current_time
-        
-        return user_config
-    
     def _get_merged_config(self, user_id: str) -> Dict[str, Any]:
-        """获取合并后的用户配置
-        
-        Args:
-            user_id: 用户ID
-            
-        Returns:
-            合并后的配置字典
-        """
-        # 获取用户配置（从缓存，因为是同步方法）
-        user_config = self._user_configs.get(user_id, {})
-        
-        # 获取全局配置
-        global_config = {
-            'system_prompt': config.system_prompt,
-            'llm': config.llm_config,
-            'tts': config.tts_config,
-            'image_generation': config.image_gen_config.dict() if hasattr(config.image_gen_config, 'dict') else {},
-            'vision': config.vision_config.dict() if hasattr(config.vision_config, 'dict') else {},
-            'emotes': config.emote_config.dict() if hasattr(config.emote_config, 'dict') else {},
-            'prompt_enhancer': config.prompt_enhancer_config.dict() if hasattr(config.prompt_enhancer_config, 'dict') else {},
-            'proactive_chat': config.proactive_chat_config,
-        }
-        
-        # 合并配置
-        merged_config = config_merger.get_user_config(global_config, user_config, skip_empty=True)
-        
-        return merged_config
+        """获取合并后的用户配置，委托到 UserResourceCache。"""
+        return self._user_cache.get_merged_config(user_id)
 
     def _get_user_llm_provider(self, user_id: str) -> Any:
-        """获取该用户的 LLM Provider（按用户配置缓存）。"""
-        merged = self._get_merged_config(user_id)
-        llm_cfg = merged.get("llm", {}) or {}
-        signature = json.dumps(llm_cfg, sort_keys=True, ensure_ascii=False)
-
-        cached = self._user_providers.get(user_id)
-        if cached is not None and self._user_provider_signatures.get(user_id) == signature:
-            return cached
-
-        try:
-            provider_name = llm_cfg.get("provider", "openai")
-            provider = get_provider(provider_name, llm_config=llm_cfg)
-        except Exception as e:
-            # 用户配置不完整时回退到全局 provider，避免影响可用性
-            self.logger.warning(f"用户 LLM 配置无效，回退全局配置 user_id={user_id}: {e}")
-            provider = self.provider
-
-        self._user_providers[user_id] = provider
-        self._user_provider_signatures[user_id] = signature
-        return provider
+        """获取该用户的 LLM Provider，委托到 UserResourceCache。"""
+        return self._user_cache.get_llm_provider(user_id, fallback_provider=self.provider)
 
     def _get_user_tts_manager(self, user_id: str) -> Optional[TTSManager]:
-        """获取该用户的 TTSManager（按用户配置缓存）。"""
-        merged = self._get_merged_config(user_id)
-        tts_cfg = merged.get("tts", {}) or {}
-        signature = json.dumps(tts_cfg, sort_keys=True, ensure_ascii=False)
-
-        cached = self._user_tts_managers.get(user_id)
-        if cached is not None and self._user_tts_signatures.get(user_id) == signature:
-            return cached
-
-        try:
-            manager = TTSManager(tts_cfg)
-        except Exception as e:
-            self.logger.warning(f"用户 TTS 配置无效，禁用 TTS user_id={user_id}: {e}")
-            manager = None
-
-        if manager is not None:
-            self._user_tts_managers[user_id] = manager
-            self._user_tts_signatures[user_id] = signature
-
-        return manager
+        """获取该用户的 TTSManager，委托到 UserResourceCache。"""
+        return self._user_cache.get_tts_manager(user_id)
 
     def _get_user_image_gen_manager(self, user_id: str) -> Optional[ImageGenerationManager]:
-        """获取该用户的 ImageGenerationManager（按用户配置缓存）。"""
-        merged = self._get_merged_config(user_id)
-        image_cfg = merged.get("image_generation", {}) or {}
-        signature = json.dumps(image_cfg, sort_keys=True, ensure_ascii=False)
+        """获取该用户的 ImageGenerationManager，委托到 UserResourceCache。"""
+        return self._user_cache.get_image_gen_manager(user_id)
 
-        cached = self._user_image_gen_managers.get(user_id)
-        if cached is not None and self._user_image_gen_signatures.get(user_id) == signature:
-            return cached
-
-        try:
-            manager = ImageGenerationManager(ImageGenerationConfig(**image_cfg))
-        except Exception as e:
-            self.logger.warning(f"用户图像生成配置无效，禁用图像生成 user_id={user_id}: {e}")
-            return None
-
-        self._user_image_gen_managers[user_id] = manager
-        self._user_image_gen_signatures[user_id] = signature
-        return manager
-    
     def _get_user_system_prompt(self, user_id: str) -> str:
-        """获取用户的系统提示词
-        
-        Args:
-            user_id: 用户ID
-            
-        Returns:
-            系统提示词
-        """
-        user_config = self._user_configs.get(user_id, {})
-        return config_merger.get_system_prompt(config.system_prompt, user_config.get('system_prompt'))
-    
+        """获取用户的系统提示词，委托到 UserResourceCache。"""
+        return self._user_cache.get_system_prompt(user_id)
+
     async def chat(self, message: str, user_id: str = "default", session_id: Optional[str] = None) -> str:
         """发送消息并获取回复"""
         try:
@@ -772,74 +601,15 @@ class Bot:
             if self.memory_manager:
                 relevant_memories = await self._get_relevant_memories(user_id, message)
 
-            # 构建增强的对话历史（包含记忆和 MCP 上下文）
-            enhanced_history = copy.deepcopy(history)
+            # 使用 ContextBuilder 构建增强的对话历史
+            enhanced_history = await self._context_builder.build(
+                message=message,
+                user_id=user_id,
+                session_id=session_id,
+                history=history,
+                relevant_memories=relevant_memories,
+            )
 
-            # 同类问题间隔较久时按“新一轮近况”处理，避免误判为重复提问
-            long_gap_repeat_hint = self._build_long_gap_repeat_hint(history, message)
-            if long_gap_repeat_hint:
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] += "\n\n" + long_gap_repeat_hint
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": long_gap_repeat_hint
-                    })
-
-            # 降低问答机器人感：按概率提示“主动分享一点自己的状态/关系感受”
-            companion_hint = self._build_companion_mode_hint(session_id, history, message)
-            if companion_hint:
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] += "\n\n" + companion_hint
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": companion_hint
-                    })
-
-            # 从 MCP 扩展收集自动上下文（例如当前时间）
-            mcp_blocks: List[str] = []
-            if self.mcp_manager:
-                try:
-                    mcp_blocks = await self.mcp_manager.collect_auto_context(message)
-                except Exception as e:
-                    print(f"[DEBUG] 检索 MCP 自动上下文失败: {e}")
-            if mcp_blocks:
-                mcp_context = "以下是 MCP 提供的实时上下文：\n" + "\n".join(
-                    f"- {block}" for block in mcp_blocks
-                )
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] += "\n\n" + mcp_context
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": mcp_context
-                    })
-
-            # 注入中期摘要上下文（可配置条数）
-            await self._append_mid_term_context(enhanced_history, user_id, session_id)
-            
-            # 如果有相关记忆，添加到上下文中
-            memory_context = self._build_memory_context(relevant_memories, history, limit=3)
-            if memory_context:
-                # 将记忆上下文作为系统消息插入（在系统提示词之后）
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    # 在系统提示词后插入记忆上下文
-                    original_system_prompt = enhanced_history[0]["content"]
-                    enhanced_history[0]["content"] = original_system_prompt + "\n\n" + memory_context
-                else:
-                    # 添加记忆上下文作为第一条系统消息
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": memory_context
-                    })
-            
-            # 添加用户消息到历史
-            enhanced_history.append({
-                "role": "user",
-                "content": message
-            })
-            
             # 调用LLM API（使用增强的历史）
             response = await provider.chat(self._to_llm_messages(enhanced_history))
             
@@ -913,74 +683,15 @@ class Bot:
             if self.memory_manager:
                 relevant_memories = await self._get_relevant_memories(user_id, message)
             mark("relevant_memories_loaded")
-            
-            # 构建增强的对话历史（包含记忆和 MCP 上下文）
-            enhanced_history = copy.deepcopy(history)
 
-            long_gap_repeat_hint = self._build_long_gap_repeat_hint(history, message)
-            if long_gap_repeat_hint:
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] = enhanced_history[0]["content"] + "\n\n" + long_gap_repeat_hint
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": long_gap_repeat_hint
-                    })
-
-            companion_hint = self._build_companion_mode_hint(session_id, history, message)
-            if companion_hint:
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] = enhanced_history[0]["content"] + "\n\n" + companion_hint
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": companion_hint
-                    })
-
-            # 从 MCP 扩展收集自动上下文
-            mcp_blocks: List[str] = []
-            if self.mcp_manager:
-                try:
-                    mcp_blocks = await self.mcp_manager.collect_auto_context(message)
-                except Exception as e:
-                    print(f"[DEBUG] 流式检索 MCP 自动上下文失败: {e}")
-            mark("mcp_context_loaded")
-            if mcp_blocks:
-                mcp_context = "以下是 MCP 提供的实时上下文：\n" + "\n".join(
-                    f"- {block}" for block in mcp_blocks
-                )
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] += "\n\n" + mcp_context
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": mcp_context
-                    })
-
-            # 注入中期摘要上下文（可配置条数）
-            await self._append_mid_term_context(enhanced_history, user_id, session_id)
-            mark("mid_term_context_loaded")
-            
-            # 如果有相关记忆，添加到上下文中
-            memory_context = self._build_memory_context(relevant_memories, history, limit=3)
-            if memory_context:
-                # 将记忆上下文作为系统消息插入（在系统提示词之后）
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    # 在系统提示词后插入记忆上下文
-                    original_system_prompt = enhanced_history[0]["content"]
-                    enhanced_history[0]["content"] = original_system_prompt + "\n\n" + memory_context
-                else:
-                    # 添加记忆上下文作为第一条系统消息
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": memory_context
-                    })
-            
-            # 添加用户消息到增强历史
-            enhanced_history.append({
-                "role": "user",
-                "content": message
-            })
+            # 使用 ContextBuilder 构建增强的对话历史
+            enhanced_history = await self._context_builder.build(
+                message=message,
+                user_id=user_id,
+                session_id=session_id,
+                history=history,
+                relevant_memories=relevant_memories,
+            )
             mark("prompt_ready")
             
             # 同时添加用户消息到原始历史（不包含记忆上下文）
@@ -1064,54 +775,14 @@ class Bot:
             if self.memory_manager:
                 relevant_memories = await self._get_relevant_memories(user_id, instruction)
 
-            enhanced_history = copy.deepcopy(history)
-
-            companion_hint = self._build_companion_mode_hint(session_id, history, instruction)
-            if companion_hint:
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] = enhanced_history[0]["content"] + "\n\n" + companion_hint
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": companion_hint
-                    })
-
-            # 添加 MCP 自动上下文（例如当前时间）
-            mcp_blocks: List[str] = []
-            if self.mcp_manager:
-                try:
-                    mcp_blocks = await self.mcp_manager.collect_auto_context(instruction)
-                except Exception as e:
-                    print(f"[DEBUG] 主动对话收集 MCP 上下文失败: {e}")
-            if mcp_blocks:
-                mcp_context = "以下是 MCP 提供的实时上下文：\n" + "\n".join(
-                    f"- {block}" for block in mcp_blocks
-                )
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] = enhanced_history[0]["content"] + "\n\n" + mcp_context
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": mcp_context
-                    })
-
-            # 注入中期摘要上下文（可配置条数）
-            await self._append_mid_term_context(enhanced_history, user_id, session_id)
-
-            memory_context = self._build_memory_context(relevant_memories, history, limit=3)
-            if memory_context:
-                if enhanced_history and enhanced_history[0]["role"] == "system":
-                    enhanced_history[0]["content"] = enhanced_history[0]["content"] + "\n\n" + memory_context
-                else:
-                    enhanced_history.insert(0, {
-                        "role": "system",
-                        "content": memory_context
-                    })
-
-            enhanced_history.append({
-                "role": "user",
-                "content": instruction
-            })
+            # 使用 ContextBuilder 构建增强的对话历史
+            enhanced_history = await self._context_builder.build(
+                message=instruction,
+                user_id=user_id,
+                session_id=session_id,
+                history=history,
+                relevant_memories=relevant_memories,
+            )
 
             response = await provider.chat(self._to_llm_messages(enhanced_history))
 
@@ -1319,18 +990,13 @@ class Bot:
     
     def clear_history(self, session_id: str = "default", user_id: str = "default"):
         """清空指定会话的对话历史"""
-        history = self._get_session_history(session_id, user_id)
-        history.clear()
         system_prompt = self._get_user_system_prompt(user_id)
-        if system_prompt:
-            history.append({
-                "role": "system",
-                "content": system_prompt
-            })
+        self._history_manager.clear(session_id, system_prompt)
     
     def get_history(self, session_id: str = "default", user_id: str = "default") -> List[Dict[str, str]]:
         """获取指定会话的对话历史"""
-        return self._get_session_history(session_id, user_id).copy()
+        system_prompt = self._get_user_system_prompt(user_id)
+        return self._history_manager.get_copy(session_id, system_prompt)
     
     def should_generate_image(self, message: str, user_id: str = "default") -> Optional[str]:
         """检查是否应该生成图像

@@ -1,18 +1,16 @@
 import logging
-from pathlib import Path
 from typing import Any, Dict, Optional
 
-import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.asr.config import ASRConfig
 from backend.asr.manager import ASRManager
+from backend.config import config as app_config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["asr"])
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 
 _asr_manager: Optional[ASRManager] = None
 bot_instance = None  # 由 main.py 启动时注入
@@ -35,25 +33,13 @@ def _get_asr_manager() -> ASRManager:
     """获取（或初始化）ASR 管理器实例"""
     global _asr_manager
     if _asr_manager is None:
-        config_path = CONFIG_PATH
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config_data = yaml.safe_load(f) or {}
-            asr_config = ASRConfig(**(config_data.get("asr") or {}))
-        except Exception as exc:  # pragma: no cover - 仅日志记录
+            asr_config = app_config.asr_config
+        except Exception as exc:
             logger.error("加载 ASR 配置失败，使用默认配置: %s", exc)
             asr_config = ASRConfig()
         _asr_manager = ASRManager(asr_config)
     return _asr_manager
-
-
-def _deep_update(target: Dict[str, Any], source: Dict[str, Any]):
-    """递归合并配置字典，避免整体覆盖嵌套字段"""
-    for key, value in source.items():
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_update(target[key], value)
-        else:
-            target[key] = value
 
 
 @router.get("/asr/config")
@@ -71,20 +57,13 @@ async def get_asr_config():
 async def update_asr_config(config_request: ASRConfigRequest):
     """更新 ASR 配置并保存到文件"""
     try:
-        config_path = CONFIG_PATH
-        with open(config_path, "r", encoding="utf-8") as f:
-            config_data = yaml.safe_load(f) or {}
-
-        if "asr" not in config_data or config_data["asr"] is None:
-            config_data["asr"] = {}
-
         update_data = config_request.dict(exclude_unset=True)
-        _deep_update(config_data["asr"], update_data)
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
+        # 通过统一的 Config 类更新并持久化
+        app_config.update_config('asr', update_data)
+        app_config.refresh_from_file()
 
-        new_asr_config = ASRConfig(**config_data["asr"])
+        new_asr_config = app_config.asr_config
 
         # 更新 API 自己的 ASR manager
         manager = _get_asr_manager()

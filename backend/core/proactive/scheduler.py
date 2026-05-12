@@ -1,47 +1,26 @@
 import asyncio
 import base64
 import random
-from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
-from ..config import config
-
-
-@dataclass
-class WindowState:
-    scheduled_time: Optional[datetime] = None
-    scheduled_date: Optional[datetime] = None
-    sent_today: int = 0
-    last_sent: Optional[datetime] = None
-
-
-@dataclass
-class ProactiveTargetState:
-    last_sent: Optional[datetime] = None
-    windows: Dict[str, WindowState] = field(default_factory=dict)
-    images_sent_today: int = 0
-    image_quota_date: Optional[datetime] = None
-    activity: Dict[str, Any] = field(default_factory=dict)
-    web_pending_messages: List[Dict[str, Any]] = field(default_factory=list)
-    next_web_message_id: int = 1
+from ...config import config
+from .models import WindowState, ProactiveTargetState
+from .behavior import (
+    should_schedule_conversation_follow_up,
+    build_follow_up_instruction,
+    build_inactivity_instruction,
+    _safe_int,
+    _shorten_text,
+    _humanize_gap,
+)
+from .message_builder import build_instruction as _build_instruction_impl
+from .web_queue import enqueue_message as _enqueue_message_impl, poll_messages as _poll_messages_impl
 
 
 class ProactiveChatScheduler:
     """主动聊天调度器，按照配置定期触发 Bot 主动问候。"""
-
-    _conversation_end_keywords = (
-        "晚安", "拜拜", "下次聊", "先这样", "先不聊", "先忙", "回头聊", "睡了", "88", "bye", "good night"
-    )
-    _follow_up_phrases = (
-        "然后呢", "后来呢", "你呢", "要不要", "想不想", "等你", "回我", "记得告诉我",
-        "方便的话", "有空的话", "跟我说说", "展开讲讲", "我想听", "和我说"
-    )
-    _open_topic_keywords = (
-        "明天", "待会", "等会", "之后", "最近", "项目", "工作", "考试", "面试", "生病",
-        "睡不着", "回家", "旅行", "聚会", "计划", "准备", "纠结", "担心", "烦", "开心"
-    )
 
     def __init__(self, bot):
         self.bot = bot
@@ -157,7 +136,7 @@ class ProactiveChatScheduler:
             )
             follow_up_cfg = self._follow_up_rules()
             if follow_up_reason and follow_up_cfg.get("enabled", True):
-                delay_seconds = self._safe_int(follow_up_cfg.get("after_seconds"), 900, minimum=30)
+                delay_seconds = _safe_int(follow_up_cfg.get("after_seconds"), 900, minimum=30)
                 activity["pending_follow_up_due_at"] = now + timedelta(seconds=delay_seconds)
                 activity["pending_follow_up_reason"] = follow_up_reason
                 activity["pending_follow_up_reference_at"] = now
@@ -178,37 +157,13 @@ class ProactiveChatScheduler:
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         state = self.target_state.get(self._compose_target_key(channel, user_id, session_id))
-        if not state or not state.web_pending_messages:
-            return []
-        safe_limit = self._safe_int(limit, 20, minimum=1)
-        messages = state.web_pending_messages[:safe_limit]
-        state.web_pending_messages = state.web_pending_messages[safe_limit:]
-        return messages
+        return _poll_messages_impl(state, limit)
 
     async def enqueue_web_message(self, target: Dict[str, Any], payload: Union[str, Dict[str, Any]]):
         user_id = target.get("user_id") or "web_user"
         session_id = target.get("session_id") or user_id
         state = self._get_or_create_state("web", user_id, session_id)
-        now = self._now()
-        message_payload: Dict[str, Any] = {
-            "id": f"web-{state.next_web_message_id}",
-            "created_at": now.isoformat(),
-            "source": "proactive",
-        }
-        state.next_web_message_id += 1
-
-        if isinstance(payload, dict):
-            text = str(payload.get("text") or "").strip()
-            if text:
-                message_payload["content"] = text
-            image_bytes = payload.get("image")
-            if isinstance(image_bytes, (bytes, bytearray)):
-                message_payload["image_base64"] = base64.b64encode(image_bytes).decode("utf-8")
-        else:
-            message_payload["content"] = str(payload)
-
-        if message_payload.get("content") or message_payload.get("image_base64"):
-            state.web_pending_messages.append(message_payload)
+        _enqueue_message_impl(state, payload, self._now())
 
     def run_coro_threadsafe(self, coro):
         """供其他线程调用的安全入口。"""
@@ -342,30 +297,18 @@ class ProactiveChatScheduler:
         window_cfg: Optional[Dict[str, Any]] = None,
         override_instruction: Optional[str] = None,
     ) -> str:
-        instruction = override_instruction or ""
-        if not instruction:
-            parts: List[str] = []
-            default_prompt = self._config.get(
-                "default_prompt",
-                "请以恋爱中的女友身份，用2-3句轻松语气主动问候“主人”的近况，结合最近对话和所有记忆，表现关心又自然。"
-            )
-            parts.append(default_prompt)
-            if target.get("prompt"):
-                parts.append(str(target["prompt"]))
-            if window_cfg and window_cfg.get("prompt"):
-                parts.append(str(window_cfg["prompt"]))
-            instruction = "\n".join(parts)
-
-        templates: List[str] = (
-            (window_cfg.get("message_templates") if window_cfg else None)
-            or target.get("message_templates")
-            or self._config.get("message_templates")
-            or []
+        default_prompt = self._config.get(
+            "default_prompt",
+            ""
         )
-        if templates:
-            instruction = f"{instruction}\n可参考灵感：{random.choice(templates)}"
-
-        return instruction
+        global_templates = self._config.get("message_templates") or []
+        return _build_instruction_impl(
+            target=target,
+            window_cfg=window_cfg,
+            override_instruction=override_instruction,
+            default_prompt=default_prompt,
+            global_templates=global_templates,
+        )
 
     async def _check_behavior_rules(
         self,
@@ -426,7 +369,7 @@ class ProactiveChatScheduler:
         return max(minimum, parsed)
 
     def _can_send_by_global_cooldown(self, state: ProactiveTargetState, now: datetime) -> bool:
-        cooldown_seconds = self._safe_int(self._behavior_rules().get("global_cooldown_seconds"), 1800, minimum=0)
+        cooldown_seconds = _safe_int(self._behavior_rules().get("global_cooldown_seconds"), 1800, minimum=0)
         if cooldown_seconds <= 0 or not state.last_sent:
             return True
         return (now - state.last_sent).total_seconds() >= cooldown_seconds
@@ -443,38 +386,8 @@ class ProactiveChatScheduler:
         now: datetime,
     ) -> str:
         cfg = self._follow_up_rules()
-        if not cfg.get("enabled", True):
-            return ""
         activity = self._ensure_activity_state(state)
-        due_at = activity.get("pending_follow_up_due_at")
-        reference_at = activity.get("pending_follow_up_reference_at")
-        last_user_at = activity.get("last_user_message_at")
-        last_assistant_at = activity.get("last_assistant_message_at")
-        if not due_at or not reference_at or not last_user_at or not last_assistant_at:
-            return ""
-        if now < due_at:
-            return ""
-        if last_user_at > last_assistant_at:
-            return ""
-        if activity.get("total_user_messages", 0) < self._safe_int(cfg.get("min_user_messages"), 1, minimum=1):
-            return ""
-        if activity.get("last_follow_up_sent_at") and activity["last_follow_up_sent_at"] >= reference_at:
-            return ""
-
-        silent_for = self._humanize_gap(now - last_assistant_at)
-        topic_summary = self._shorten_text(activity.get("last_user_message") or "", 90)
-        last_reply = self._shorten_text(activity.get("last_assistant_message") or "", 120)
-        custom_instruction = str(cfg.get("instruction") or "").strip()
-        parts = [
-            custom_instruction or "请像真实伴侣一样，自然续上刚才没聊完的话题，用1-2句轻轻追一句，不要像系统提醒。",
-            f"距离你上一句发出后，对方已经安静了大约 {silent_for}。",
-        ]
-        if topic_summary:
-            parts.append(f"用户刚才提到：{topic_summary}")
-        if last_reply:
-            parts.append(f"你上一句大意：{last_reply}")
-        parts.append("延续刚才的话题，不要重新开场，不要重复整段上下文，不要直接说“检测到你没回复”。")
-        return "\n".join(parts)
+        return build_follow_up_instruction(activity, now, cfg)
 
     def _build_inactivity_instruction(
         self,
@@ -483,52 +396,11 @@ class ProactiveChatScheduler:
         now: datetime,
     ) -> str:
         cfg = self._inactive_rules()
-        if not cfg.get("enabled", True):
-            return ""
         activity = self._ensure_activity_state(state)
-        last_user_at = activity.get("last_user_message_at")
-        if not last_user_at:
-            return ""
-        min_user_messages = self._safe_int(cfg.get("min_user_messages"), 1, minimum=1)
-        if activity.get("total_user_messages", 0) < min_user_messages:
-            return ""
-        after_seconds = self._safe_int(cfg.get("after_seconds"), 21600, minimum=60)
-        if (now - last_user_at).total_seconds() < after_seconds:
-            return ""
-        if activity.get("inactivity_triggered_for_user_at") == last_user_at:
-            return ""
-        last_assistant_at = activity.get("last_assistant_message_at")
-        if last_assistant_at and last_user_at > last_assistant_at:
-            return ""
-
-        silent_for = self._humanize_gap(now - last_user_at)
-        topic_summary = self._shorten_text(activity.get("last_user_message") or "", 90)
-        custom_instruction = str(cfg.get("instruction") or "").strip()
-        parts = [
-            custom_instruction or "请主动发一条自然的关心问候，像恋人想起对方时顺手发来的消息，语气轻松，不要太正式。",
-            f"对方已经大约 {silent_for} 没来找你聊天了。",
-        ]
-        if topic_summary:
-            parts.append(f"他上次提到过：{topic_summary}")
-        parts.append("可以自然表达想念、关心近况或延续一点熟悉感，但不要显得催促，也不要说自己在执行规则。")
-        return "\n".join(parts)
+        return build_inactivity_instruction(activity, now, cfg)
 
     def _should_schedule_conversation_follow_up(self, last_user_message: str, assistant_message: str) -> Optional[str]:
-        user_text = str(last_user_message or "").strip().lower()
-        assistant_text = str(assistant_message or "").strip().lower()
-        if not user_text or not assistant_text:
-            return None
-        if any(keyword.lower() in user_text for keyword in self._conversation_end_keywords):
-            return None
-        if any(keyword.lower() in assistant_text for keyword in self._conversation_end_keywords):
-            return None
-        if "?" in assistant_text or "？" in assistant_text:
-            return "assistant_question"
-        if any(phrase.lower() in assistant_text for phrase in self._follow_up_phrases):
-            return "assistant_open_loop"
-        if len(user_text) >= 8 and any(keyword.lower() in user_text for keyword in self._open_topic_keywords):
-            return "user_open_topic"
-        return None
+        return should_schedule_conversation_follow_up(last_user_message, assistant_message)
 
     def _shorten_text(self, text: str, limit: int = 80) -> str:
         normalized = " ".join(str(text or "").strip().split())
@@ -682,7 +554,7 @@ class ProactiveChatScheduler:
 
     def _extract_image_prompt(self, reply: str) -> Tuple[str, Optional[str]]:
         """解析主动回复中的 [GEN_IMG: ...] 标签"""
-        from .gen_img_parser import extract_gen_img_prompt
+        from ..gen_img_parser import extract_gen_img_prompt
         return extract_gen_img_prompt(reply)
 
     async def _maybe_attach_image(

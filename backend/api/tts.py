@@ -14,6 +14,7 @@ import yaml
 from pathlib import Path
 import logging
 from ..tts.manager import TTSManager
+from ..config import config as app_config
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +54,11 @@ def get_tts_manager() -> TTSManager:
     """获取TTS管理器实例"""
     global _tts_manager
     if _tts_manager is None:
-        # 从配置文件加载TTS配置
-        config_path = Path("config.yaml")
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                tts_config = config.get('tts', {})
-                _tts_manager = TTSManager(tts_config)
+            tts_config = app_config.tts_config
+            _tts_manager = TTSManager(tts_config)
         except Exception as e:
             logger.error(f"加载TTS配置失败: {str(e)}")
-            # 使用默认配置
             _tts_manager = TTSManager({})
     return _tts_manager
 
@@ -113,29 +109,16 @@ async def get_tts_config():
 async def update_tts_config(config_request: TTSConfigRequest):
     """更新TTS配置"""
     try:
-        # 读取现有配置
-        config_path = Path("config.yaml")
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        
         # 只更新提供的字段
         update_data = config_request.dict(exclude_unset=True)
         
-        # 更新TTS配置
-        if 'tts' not in config:
-            config['tts'] = {}
-        
-        for key, value in update_data.items():
-            if value is not None:
-                config['tts'][key] = value
-        
-        # 保存配置
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+        # 通过统一的 Config 类更新并持久化
+        app_config.update_config('tts', {k: v for k, v in update_data.items() if v is not None})
+        app_config.refresh_from_file()
         
         # 更新TTS管理器配置
         manager = get_tts_manager()
-        manager.update_config(config['tts'])
+        manager.update_config(app_config.tts_config)
         
         logger.info("TTS配置更新成功")
         return {"success": True, "message": "TTS配置更新成功"}

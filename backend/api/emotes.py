@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 
 from ..config import config
 from ..emote import EmoteConfig, EmoteManager
-from .chat import get_bot, reset_bot
+from .bot_provider import get_bot, reset_bot
 
 router = APIRouter(prefix="/api/emotes", tags=["emotes"])
 
