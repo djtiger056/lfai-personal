@@ -12,8 +12,10 @@ from backend.asr.manager import ASRManager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["asr"])
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 
 _asr_manager: Optional[ASRManager] = None
+bot_instance = None  # 由 main.py 启动时注入
 
 
 class ASRConfigRequest(BaseModel):
@@ -23,6 +25,7 @@ class ASRConfigRequest(BaseModel):
     provider: Optional[str] = Field(None, description="ASR 提供商")
     siliconflow: Optional[Dict[str, Any]] = Field(None, description="硅基流动配置")
     qwen: Optional[Dict[str, Any]] = Field(None, description="千问配置")
+    assemblyai: Optional[Dict[str, Any]] = Field(None, description="AssemblyAI配置")
     auto_send_to_llm: Optional[bool] = Field(None, description="是否自动把识别结果发给 LLM")
     processing_message: Optional[str] = Field(None, description="处理中的提示语")
     error_message: Optional[str] = Field(None, description="失败提示语")
@@ -32,7 +35,7 @@ def _get_asr_manager() -> ASRManager:
     """获取（或初始化）ASR 管理器实例"""
     global _asr_manager
     if _asr_manager is None:
-        config_path = Path("config.yaml")
+        config_path = CONFIG_PATH
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config_data = yaml.safe_load(f) or {}
@@ -68,7 +71,7 @@ async def get_asr_config():
 async def update_asr_config(config_request: ASRConfigRequest):
     """更新 ASR 配置并保存到文件"""
     try:
-        config_path = Path("config.yaml")
+        config_path = CONFIG_PATH
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = yaml.safe_load(f) or {}
 
@@ -81,8 +84,19 @@ async def update_asr_config(config_request: ASRConfigRequest):
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
+        new_asr_config = ASRConfig(**config_data["asr"])
+
+        # 更新 API 自己的 ASR manager
         manager = _get_asr_manager()
-        manager.update_config(ASRConfig(**config_data["asr"]))
+        manager.update_config(new_asr_config)
+
+        # 同步更新 Bot 实例的 ASR manager（QQ 适配器等用的是 Bot 的）
+        if bot_instance is not None and hasattr(bot_instance, 'asr_manager'):
+            if bot_instance.asr_manager is not None:
+                bot_instance.asr_manager.update_config(new_asr_config)
+            else:
+                bot_instance.asr_manager = ASRManager(new_asr_config)
+            logger.info("Bot 实例的 ASR 配置已同步更新")
 
         return {"success": True, "message": "ASR 配置更新成功"}
     except Exception as exc:

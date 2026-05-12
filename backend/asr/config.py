@@ -18,12 +18,21 @@ class QwenASRConfig(BaseModel):
     timeout: int = 30
 
 
+class AssemblyAIASRConfig(BaseModel):
+    """AssemblyAI ASR配置"""
+    api_base: str = "https://api.assemblyai.com"
+    api_key: str = ""
+    model: str = "universal-3-pro"
+    timeout: int = 60
+
+
 class ASRConfig(BaseModel):
     """ASR语音识别配置"""
     enabled: bool = False
     provider: str = "siliconflow"  # 当前提供商
     siliconflow: SiliconFlowASRConfig = SiliconFlowASRConfig()
     qwen: QwenASRConfig = QwenASRConfig()
+    assemblyai: AssemblyAIASRConfig = AssemblyAIASRConfig()
     # 是否自动发送识别结果给LLM
     auto_send_to_llm: bool = True
     # 处理中消息

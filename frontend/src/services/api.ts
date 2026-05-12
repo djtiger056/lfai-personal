@@ -583,6 +583,10 @@ export const proactiveApi = {
   triggerOnce: async (payload: { channel: string; user_id: string; session_id?: string; display_name?: string; instruction?: string; }): Promise<string> => {
     const response = await api.post('/proactive/trigger', payload)
     return response.data.message
+  },
+  pollMessages: async (params: { channel: string; user_id: string; session_id?: string; limit?: number }): Promise<any[]> => {
+    const response = await api.get('/proactive/messages', { params })
+    return response.data.messages || []
   }
 }
 

@@ -5,6 +5,8 @@ from typing import Dict, Any
 import json
 import time
 
+from . import proactive as proactive_api
+
 router = APIRouter(prefix="/api", tags=["chat"])
 
 # 共享Bot实例和当前LLM签名（用于热更新）
@@ -53,6 +55,7 @@ def reset_bot():
 class ChatRequest(BaseModel):
     message: str
     user_id: str = "web_user"
+    session_id: str | None = None
 
 def _detect_audio_mime(audio_data: bytes) -> str:
     if not audio_data:
@@ -68,7 +71,10 @@ async def chat(request: ChatRequest):
     """普通聊天接口"""
     try:
         bot = get_bot()
-        response = await bot.chat(request.message, request.user_id)
+        session_id = request.session_id or request.user_id
+        proactive_api.record_user_activity("web", request.user_id, session_id, request.message)
+        response = await bot.chat(request.message, request.user_id, session_id=session_id)
+        proactive_api.record_assistant_activity("web", request.user_id, session_id, response)
 
         # 获取生成的图片（如果有）
         last_image = bot.get_last_generated_image()
@@ -125,6 +131,7 @@ async def chat_stream(request: ChatRequest):
     """流式聊天接口"""
     async def generate():
         request_start = time.perf_counter()
+        session_id = request.session_id or request.user_id
 
         def elapsed_ms() -> float:
             return round((time.perf_counter() - request_start) * 1000, 2)
@@ -144,12 +151,13 @@ async def chat_stream(request: ChatRequest):
         try:
             yield meta_event("server_request_received")
             bot = get_bot()
+            proactive_api.record_user_activity("web", request.user_id, session_id, request.message)
             yield meta_event("bot_ready")
             full_response = ""
             first_chunk_seen = False
 
             # 流式输出文本
-            async for chunk in bot.chat_stream(request.message, request.user_id):
+            async for chunk in bot.chat_stream(request.message, request.user_id, session_id=session_id):
                 if not first_chunk_seen:
                     yield meta_event("first_model_chunk")
                     first_chunk_seen = True
@@ -157,6 +165,7 @@ async def chat_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'content': chunk})}\n\n"
 
             yield meta_event("llm_stream_done", {"response_chars": len(full_response)})
+            proactive_api.record_assistant_activity("web", request.user_id, session_id, full_response)
 
             # 获取生成的图片（如果有）
             last_image = bot.get_last_generated_image()

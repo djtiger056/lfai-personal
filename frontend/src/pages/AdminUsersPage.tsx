@@ -720,31 +720,146 @@ const AdminUsersPage: React.FC = () => {
                         </Form.Item>
                       </Col>
                       <Col span={12}>
-                        <Form.Item name={['image_generation', 'provider']} label="提供商">
+                        <Form.Item name={['image_generation', 'provider']} label="主提供商">
                           <Select placeholder="选择提供商" allowClear>
                             <Option value="yunwu">云舞</Option>
                             <Option value="modelscope">魔搭社区</Option>
+                            <Option value="kling_api">本地 kling-api</Option>
                           </Select>
                         </Form.Item>
                       </Col>
                     </Row>
-                    <Form.Item name={['image_generation', 'model']} label="模型">
-                      <Input placeholder="模型名称" allowClear />
-                    </Form.Item>
                     <Row gutter={16}>
                       <Col span={12}>
-                        <Form.Item name={['image_generation', 'width']} label="宽度">
-                          <Input type="number" placeholder="1024" allowClear />
+                        <Form.Item name={['image_generation', 'enable_fallback']} label="启用自动降级" valuePropName="checked">
+                          <Switch />
                         </Form.Item>
                       </Col>
                       <Col span={12}>
-                        <Form.Item name={['image_generation', 'height']} label="高度">
-                          <Input type="number" placeholder="1024" allowClear />
+                        <Form.Item noStyle shouldUpdate>
+                          {({ getFieldValue }) => (
+                            <Form.Item name={['image_generation', 'fallback_provider']} label="备用提供商">
+                              <Select
+                                placeholder="主提供商失败时使用"
+                                allowClear
+                                options={[
+                                  { value: 'yunwu', label: '云舞' },
+                                  { value: 'modelscope', label: '魔搭社区' },
+                                  { value: 'kling_api', label: '本地 kling-api' },
+                                ].filter((item) => item.value !== getFieldValue(['image_generation', 'provider']))}
+                              />
+                            </Form.Item>
+                          )}
                         </Form.Item>
                       </Col>
                     </Row>
-                    <Form.Item name={['image_generation', 'api_key']} label="API Key">
-                      <Input.Password placeholder="留空使用全局API Key" allowClear />
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'modelscope', 'api_key']} label="魔搭 API Key">
+                          <Input.Password placeholder="留空使用全局 API Key" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'modelscope', 'model']} label="魔搭模型">
+                          <Input placeholder="Tongyi-MAI/Z-Image-Turbo" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'yunwu', 'api_key']} label="云舞 API Key">
+                          <Input.Password placeholder="留空使用全局 API Key" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'yunwu', 'model']} label="云舞模型">
+                          <Input placeholder="jimeng-4.5" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'yunwu', 'api_base']} label="云舞 API 地址">
+                          <Input placeholder="https://yunwu.ai/v1" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'yunwu', 'timeout']} label="云舞超时（秒）">
+                          <Input type="number" placeholder="120" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Divider titlePlacement="left">kling-api 配置</Divider>
+                    <Alert
+                      message="kling-api 说明"
+                      description="这里填写 /myproject/kling-api 暴露的接口地址。若该服务开启了 SERVER_API_KEYS，这里也要填对应 x-api-key。"
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                    />
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'api_base']} label="kling-api 地址">
+                          <Input placeholder="http://127.0.0.1:18080" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'api_key']} label="kling-api API Key">
+                          <Input.Password placeholder="未开启鉴权可留空" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'model']} label="kling-api 模型">
+                          <Input placeholder="kling-v2-1" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'size']} label="图片尺寸">
+                          <Input placeholder="1024x1024" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'timeout']} label="kling-api 超时（秒）">
+                          <Input type="number" placeholder="180" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'poll_interval']} label="轮询间隔（秒）">
+                          <Input type="number" step="0.5" placeholder="3" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'transport']} label="传输模式">
+                          <Input placeholder="web" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'kling_api', 'response_format']} label="响应格式">
+                          <Input placeholder="url / b64_json" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Form.Item name={['image_generation', 'kling_api', 'target_url']} label="目标页面地址">
+                      <Input placeholder="https://klingai.com/app/image/new" allowClear />
+                    </Form.Item>
+                    <Divider titlePlacement="left">触发与提示文案</Divider>
+                    <Form.Item name={['image_generation', 'trigger_keywords']} label="触发关键词">
+                      <Select mode="tags" placeholder="输入关键词后回车" allowClear />
+                    </Form.Item>
+                    <Form.Item name={['image_generation', 'generating_message']} label="生成中提示">
+                      <Input placeholder="🎨 正在为你生成图片，请稍候..." allowClear />
+                    </Form.Item>
+                    <Form.Item name={['image_generation', 'error_message']} label="失败提示">
+                      <Input placeholder="😢 图片生成失败：{error}" allowClear />
+                    </Form.Item>
+                    <Form.Item name={['image_generation', 'success_message']} label="成功提示">
+                      <Input placeholder="✨ 图片已生成完成！" allowClear />
                     </Form.Item>
                     <Button 
                       size="small" 

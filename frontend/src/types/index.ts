@@ -109,6 +109,12 @@ export interface ASRConfig {
     model: string
     timeout: number
   }
+  assemblyai: {
+    api_base: string
+    api_key: string
+    model: string
+    timeout: number
+  }
 }
 
 export interface ChatMessage {

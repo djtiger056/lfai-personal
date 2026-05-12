@@ -11,6 +11,7 @@ import re
 from typing import Optional, Dict, Any
 from ..core.bot import Bot
 from ..config import config
+from ..api import proactive as proactive_api
 from ..utils.text_splitter import smart_split_text
 
 
@@ -264,7 +265,9 @@ class QQAdapter:
 
         # 生成回复
         try:
+            proactive_api.record_user_activity("qq_private", user_id, user_id, text_content)
             response = await self.bot.chat(text_content, user_id=user_id)
+            proactive_api.record_assistant_activity("qq_private", user_id, user_id, response)
 
             # 检查是否有主动生成的图片
             last_image = self.bot.get_last_generated_image()
@@ -422,7 +425,9 @@ class QQAdapter:
         # 生成回复
         try:
             session_id = f"group_{group_id}_{user_id}"
+            proactive_api.record_user_activity("qq_group", group_id, session_id, text_content)
             response = await self.bot.chat(text_content, user_id=user_id, session_id=session_id)
+            proactive_api.record_assistant_activity("qq_group", group_id, session_id, response)
 
             # 检查是否有主动生成的图片
             last_image = self.bot.get_last_generated_image()
@@ -1109,7 +1114,19 @@ class QQAdapter:
                 user_identifier = f"group_{group_id}_{user_id}"
             
             effective_user_id = user_id or target_id
+            proactive_api.record_user_activity(
+                "qq_group" if is_group else "qq_private",
+                target_id,
+                user_identifier,
+                user_message,
+            )
             llm_response = await self.bot.chat(user_message, user_id=effective_user_id, session_id=user_identifier)
+            proactive_api.record_assistant_activity(
+                "qq_group" if is_group else "qq_private",
+                target_id,
+                user_identifier,
+                llm_response,
+            )
              
             # 语音合成（如果有）
             audio_data = None
@@ -1209,7 +1226,19 @@ class QQAdapter:
                 user_identifier = f"group_{group_id}_{user_id}"
 
             effective_user_id = user_id or target_id
+            proactive_api.record_user_activity(
+                "qq_group" if is_group else "qq_private",
+                target_id,
+                user_identifier,
+                user_message,
+            )
             llm_response = await self.bot.chat(user_message, user_id=effective_user_id, session_id=user_identifier)
+            proactive_api.record_assistant_activity(
+                "qq_group" if is_group else "qq_private",
+                target_id,
+                user_identifier,
+                llm_response,
+            )
 
             # 语音合成（如果有）
             audio_data = None

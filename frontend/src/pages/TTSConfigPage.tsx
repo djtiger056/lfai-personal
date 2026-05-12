@@ -33,6 +33,12 @@ const qwenASRModels = [
   'qwen3-asr-flash',
   'qwen3-asr-plus'
 ]
+const assemblyAIModels = [
+  'universal-3-pro',
+  'universal-2',
+  'nano'
+]
+
 
 const TTSConfigPage: React.FC = () => {
   const [ttsForm] = Form.useForm<TTSConfig>()
@@ -121,6 +127,12 @@ const TTSConfigPage: React.FC = () => {
           api_key: config?.qwen?.api_key || '',
           model: config?.qwen?.model || 'qwen3-asr-flash',
           timeout: config?.qwen?.timeout || 30,
+        },
+        assemblyai: {
+          api_base: config?.assemblyai?.api_base || 'https://api.assemblyai.com',
+          api_key: config?.assemblyai?.api_key || '',
+          model: config?.assemblyai?.model || 'universal-3-pro',
+          timeout: config?.assemblyai?.timeout || 60,
         }
       })
     } catch (error) {
@@ -257,6 +269,14 @@ const TTSConfigPage: React.FC = () => {
         const apiKey = (values?.qwen?.api_key || '').trim()
         if (!apiKey) {
           message.error('请先填写千问 API Key（DashScope）')
+          return
+        }
+      }
+
+      if (values?.provider === 'assemblyai') {
+        const apiKey = (values?.assemblyai?.api_key || '').trim()
+        if (!apiKey) {
+          message.error('请先填写 AssemblyAI API Key')
           return
         }
       }
@@ -820,6 +840,7 @@ const TTSConfigPage: React.FC = () => {
                 <Select>
                   <Option value="siliconflow">硅基流动</Option>
                   <Option value="qwen">千问（DashScope）</Option>
+                  <Option value="assemblyai">AssemblyAI</Option>
                 </Select>
               </Form.Item>
             </Col>
@@ -893,7 +914,6 @@ const TTSConfigPage: React.FC = () => {
           {selectedAsrProvider === 'qwen' && (
             <>
               <Divider>千问 ASR 配置（DashScope）</Divider>
-
               <Form.Item
                 name={['qwen', 'api_base']}
                 label="API 地址"
@@ -902,7 +922,6 @@ const TTSConfigPage: React.FC = () => {
               >
                 <Input placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
               </Form.Item>
-
               <Form.Item
                 name={['qwen', 'api_key']}
                 label="API 密钥"
@@ -910,7 +929,6 @@ const TTSConfigPage: React.FC = () => {
               >
                 <Input.Password placeholder="请输入千问 DashScope API Key" />
               </Form.Item>
-
               <Row gutter={16}>
                 <Col span={12}>
                   <Form.Item
@@ -933,6 +951,56 @@ const TTSConfigPage: React.FC = () => {
                     label="超时时间（秒）"
                   >
                     <InputNumber min={5} max={180} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </>
+          )}
+
+          {selectedAsrProvider === 'assemblyai' && (
+            <>
+              <Divider>AssemblyAI 配置</Divider>
+
+              <Form.Item
+                name={['assemblyai', 'api_base']}
+                label="API 地址"
+                extra="默认使用官方地址；如有代理可自行修改"
+                rules={[{ required: true, message: '请输入 API 地址' }]}
+              >
+                <Input placeholder="https://api.assemblyai.com" />
+              </Form.Item>
+
+              <Form.Item
+                name={['assemblyai', 'api_key']}
+                label="API 密钥"
+                rules={[{ required: true, message: '请输入 API 密钥' }]}
+              >
+                <Input.Password placeholder="请输入 AssemblyAI API Key" />
+              </Form.Item>
+
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item
+                    name={['assemblyai', 'model']}
+                    label="模型"
+                    rules={[{ required: true, message: '请选择模型' }]}
+                  >
+                    <Select showSearch placeholder="例：universal-3-pro" optionFilterProp="children">
+                      {assemblyAIModels.map((model) => (
+                        <Option value={model} key={model}>
+                          {model}
+                        </Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item
+                    name={['assemblyai', 'timeout']}
+                    label="超时时间（秒）"
+                    extra="AssemblyAI 为异步转录，建议设大一些（30-120秒）"
+                  >
+                    <InputNumber min={10} max={300} style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
               </Row>

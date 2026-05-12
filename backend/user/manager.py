@@ -13,6 +13,13 @@ class UserManager:
     """用户管理器"""
     
     def __init__(self, db_url: str = "sqlite+aiosqlite:///data/users.db"):
+        if db_url.startswith("sqlite+aiosqlite:///") and not db_url.startswith("sqlite+aiosqlite:////"):
+            from pathlib import Path
+            project_root = Path(__file__).resolve().parents[2]
+            relative_path = db_url.replace("sqlite+aiosqlite:///", "", 1)
+            db_file = project_root / relative_path
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+            db_url = f"sqlite+aiosqlite:///{db_file.as_posix()}"
         self.engine = create_async_engine(db_url, echo=False)
         self.async_session_factory = async_sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False

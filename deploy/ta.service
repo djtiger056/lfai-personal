@@ -1,0 +1,16 @@
+[Unit]
+Description=Ta (LFBot) backend service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/myproject/Ta
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/myproject/Ta/.venv/bin/python /myproject/Ta/backend/main.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

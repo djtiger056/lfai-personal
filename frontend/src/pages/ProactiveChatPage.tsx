@@ -58,9 +58,9 @@ const defaultWindow: TimeWindow = {
 }
 
 const defaultTarget: TargetForm = {
-  channel: 'qq_private',
-  user_id: '',
-  session_id: '',
+  channel: 'web',
+  user_id: 'web_user',
+  session_id: 'web_user',
   display_name: '',
   prompt: '',
   time_windows: [defaultWindow],
@@ -109,6 +109,22 @@ const ProactiveChatPage: React.FC = () => {
         image_generation_enabled: cfg?.image_generation?.enabled ?? false,
         image_generation_max_per_day: cfg?.image_generation?.max_per_day ?? 3,
         message_templates_text: (cfg?.message_templates || []).join('\n'),
+        behavior_rules: {
+          enabled: cfg?.behavior_rules?.enabled ?? true,
+          global_cooldown_seconds: cfg?.behavior_rules?.global_cooldown_seconds ?? 1800,
+          inactive_greeting: {
+            enabled: cfg?.behavior_rules?.inactive_greeting?.enabled ?? true,
+            after_seconds: cfg?.behavior_rules?.inactive_greeting?.after_seconds ?? 21600,
+            min_user_messages: cfg?.behavior_rules?.inactive_greeting?.min_user_messages ?? 1,
+            instruction: cfg?.behavior_rules?.inactive_greeting?.instruction || '',
+          },
+          conversation_follow_up: {
+            enabled: cfg?.behavior_rules?.conversation_follow_up?.enabled ?? true,
+            after_seconds: cfg?.behavior_rules?.conversation_follow_up?.after_seconds ?? 900,
+            min_user_messages: cfg?.behavior_rules?.conversation_follow_up?.min_user_messages ?? 1,
+            instruction: cfg?.behavior_rules?.conversation_follow_up?.instruction || '',
+          },
+        },
         targets: targets.length ? targets : [defaultTarget],
       })
     } catch (err) {
@@ -149,6 +165,22 @@ const ProactiveChatPage: React.FC = () => {
           max_per_day: values.image_generation_max_per_day,
         },
         message_templates: buildTemplates(values.message_templates_text),
+        behavior_rules: {
+          enabled: values.behavior_rules?.enabled ?? true,
+          global_cooldown_seconds: values.behavior_rules?.global_cooldown_seconds,
+          inactive_greeting: {
+            enabled: values.behavior_rules?.inactive_greeting?.enabled ?? true,
+            after_seconds: values.behavior_rules?.inactive_greeting?.after_seconds,
+            min_user_messages: values.behavior_rules?.inactive_greeting?.min_user_messages,
+            instruction: values.behavior_rules?.inactive_greeting?.instruction,
+          },
+          conversation_follow_up: {
+            enabled: values.behavior_rules?.conversation_follow_up?.enabled ?? true,
+            after_seconds: values.behavior_rules?.conversation_follow_up?.after_seconds,
+            min_user_messages: values.behavior_rules?.conversation_follow_up?.min_user_messages,
+            instruction: values.behavior_rules?.conversation_follow_up?.instruction,
+          },
+        },
         targets: (values.targets || []).map((t: TargetForm) => {
           const imageGeneration: ImageGenerationSetting = {}
           if (typeof t.image_generation_enabled === 'boolean') {
@@ -275,6 +307,14 @@ const ProactiveChatPage: React.FC = () => {
                 <Collapse ghost size="small">
                   {statusTargets.slice(0, 3).map(([key, info]) => (
                     <Panel header={`${key} - 最后发送: ${info.last_sent || '无'}`} key={key}>
+                      {info.activity && (
+                        <div style={{ fontSize: '12px', color: '#666', marginBottom: 8 }}>
+                          最近用户发言: {info.activity.last_user_message_at || '无'}<br />
+                          最近 AI 发言: {info.activity.last_assistant_message_at || '无'}<br />
+                          待续聊触发时间: {info.activity.pending_follow_up_due_at || '无'}<br />
+                          最近用户内容: {info.activity.last_user_message || '无'}
+                        </div>
+                      )}
                       {info.windows && Object.entries(info.windows as Record<string, any>).map(([wKey, w]) => (
                         <div key={wKey} style={{ marginBottom: 4 }}>
                           <Text strong>{wKey}</Text>
@@ -301,6 +341,12 @@ const ProactiveChatPage: React.FC = () => {
 
       {/* 配置区域 */}
       <Card title="配置管理">
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="Web 聊天页已固定使用 channel=`web`、user_id=`web_user`、session_id=`web_user`。如果你想在网页里测试主动聊天，新增或修改一个目标为这组值即可。"
+        />
         <Form
           form={form}
           layout="vertical"
@@ -310,6 +356,20 @@ const ProactiveChatPage: React.FC = () => {
             check_interval_seconds: 60,
             image_generation_enabled: false,
             image_generation_max_per_day: 3,
+            behavior_rules: {
+              enabled: true,
+              global_cooldown_seconds: 1800,
+              inactive_greeting: {
+                enabled: true,
+                after_seconds: 21600,
+                min_user_messages: 1,
+              },
+              conversation_follow_up: {
+                enabled: true,
+                after_seconds: 900,
+                min_user_messages: 1,
+              },
+            },
             targets: [defaultTarget],
           }}
         >
@@ -367,6 +427,65 @@ const ProactiveChatPage: React.FC = () => {
                 </Form.Item>
               </Col>
             </Row>
+          </Card>
+
+          <Card size="small" title="拟人化规则" style={{ marginBottom: 16 }}>
+            <Row gutter={16}>
+              <Col span={6}>
+                <Form.Item label="启用行为规则" name={['behavior_rules', 'enabled']} valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="全局冷却(秒)" name={['behavior_rules', 'global_cooldown_seconds']}>
+                  <InputNumber min={0} max={86400} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+            </Row>
+
+            <Divider plain>长期未聊问候</Divider>
+            <Row gutter={16}>
+              <Col span={6}>
+                <Form.Item label="启用" name={['behavior_rules', 'inactive_greeting', 'enabled']} valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="多久未聊触发(秒)" name={['behavior_rules', 'inactive_greeting', 'after_seconds']}>
+                  <InputNumber min={60} max={604800} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="最少历史用户消息数" name={['behavior_rules', 'inactive_greeting', 'min_user_messages']}>
+                  <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item label="长期未聊补充提示词" name={['behavior_rules', 'inactive_greeting', 'instruction']}>
+              <TextArea rows={2} placeholder="例如：像突然想起对方一样，发一句自然问候，不要显得催促。" />
+            </Form.Item>
+
+            <Divider plain>话题未完续聊</Divider>
+            <Row gutter={16}>
+              <Col span={6}>
+                <Form.Item label="启用" name={['behavior_rules', 'conversation_follow_up', 'enabled']} valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="沉默多久续聊(秒)" name={['behavior_rules', 'conversation_follow_up', 'after_seconds']}>
+                  <InputNumber min={30} max={86400} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item label="最少历史用户消息数" name={['behavior_rules', 'conversation_follow_up', 'min_user_messages']}>
+                  <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item label="续聊补充提示词" name={['behavior_rules', 'conversation_follow_up', 'instruction']}>
+              <TextArea rows={2} placeholder="例如：像真实伴侣一样轻轻追一句，延续上个话题，不要像系统提醒。" />
+            </Form.Item>
           </Card>
 
           {/* 用户配置区域 */}

@@ -1,11 +1,9 @@
-from typing import Dict, Any, Optional
-import asyncio
-from fastapi import APIRouter, HTTPException
+from typing import Any, Dict, Optional
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from ..config import config
 from ..core.proactive import ProactiveChatScheduler
-from .chat import get_bot
 
 router = APIRouter(prefix="/api", tags=["proactive"])
 
@@ -23,7 +21,7 @@ class ProactiveConfigRequest(BaseModel):
     idle_window: Optional[Dict[str, Any]] = None
     message_templates: Optional[list] = None
     image_generation: Optional[Dict[str, Any]] = None
-    image_generation: Optional[Dict[str, Any]] = None
+    behavior_rules: Optional[Dict[str, Any]] = None
 
 
 class ProactiveTriggerRequest(BaseModel):
@@ -32,6 +30,32 @@ class ProactiveTriggerRequest(BaseModel):
     session_id: Optional[str] = None
     display_name: Optional[str] = None
     instruction: Optional[str] = None
+
+
+def record_user_activity(channel: str, user_id: str, session_id: Optional[str], message: Optional[str]):
+    scheduler = scheduler_instance
+    if not scheduler:
+        return
+    try:
+        scheduler.record_user_activity(channel, user_id, session_id, message)
+    except Exception as e:
+        print(f"[Proactive] 记录用户活跃失败: {e}")
+
+
+def record_assistant_activity(
+    channel: str,
+    user_id: str,
+    session_id: Optional[str],
+    message: Optional[str],
+    allow_follow_up: bool = True,
+):
+    scheduler = scheduler_instance
+    if not scheduler:
+        return
+    try:
+        scheduler.record_assistant_activity(channel, user_id, session_id, message, allow_follow_up=allow_follow_up)
+    except Exception as e:
+        print(f"[Proactive] 记录助手活跃失败: {e}")
 
 
 def _require_scheduler() -> ProactiveChatScheduler:
@@ -60,7 +84,8 @@ async def update_proactive_config(cfg: ProactiveConfigRequest):
         scheduler = scheduler_instance
         if scheduler:
             try:
-                scheduler.run_coro_threadsafe(scheduler.reload_config())
+                future = scheduler.run_coro_threadsafe(scheduler.reload_config())
+                future.result(timeout=3)
             except Exception as e:
                 print(f"[Proactive] 调度器热更新失败: {e}")
         return {"message": "配置已更新", "config": config.proactive_chat_config}
@@ -72,7 +97,13 @@ async def update_proactive_config(cfg: ProactiveConfigRequest):
 async def proactive_status():
     scheduler = scheduler_instance
     if not scheduler:
-        return {"running": False, "enabled": False, "message": "调度器未初始化"}
+        proactive_cfg = config.proactive_chat_config or {}
+        return {
+            "running": False,
+            "enabled": bool(proactive_cfg.get("enabled", False)),
+            "config_loaded": True,
+            "message": "调度器未初始化，通常说明后端仍在运行旧版本代码或需要重启适配器线程。",
+        }
     try:
         return scheduler.status_snapshot()
     except Exception as e:
@@ -99,3 +130,20 @@ async def trigger_proactive(req: ProactiveTriggerRequest):
         return {"message": reply}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"触发主动聊天失败: {e}")
+
+
+@router.get("/proactive/messages")
+async def poll_proactive_messages(
+    channel: str = Query(default="web"),
+    user_id: str = Query(...),
+    session_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    scheduler = scheduler_instance
+    if not scheduler:
+        return {"messages": []}
+    try:
+        messages = scheduler.poll_pending_messages(channel, user_id, session_id, limit=limit)
+        return {"messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取主动消息失败: {e}")

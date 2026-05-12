@@ -10,6 +10,7 @@ from .chat import reset_bot
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["config"])
+CONFIG_PATH = config.config_path
 
 class ConfigRequest(BaseModel):
     llm: Optional[Dict[str, Any]] = Field(None, description="LLM配置")
@@ -20,7 +21,7 @@ class ConfigRequest(BaseModel):
 async def get_config():
     """获取系统配置"""
     try:
-        config_path = Path("config.yaml")
+        config_path = CONFIG_PATH
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         return config
@@ -31,7 +32,7 @@ async def get_config():
 async def update_config(config_data: ConfigRequest):
     """更新系统配置"""
     try:
-        config_path = Path("config.yaml")
+        config_path = CONFIG_PATH
         
         # 读取现有配置
         with open(config_path, 'r', encoding='utf-8') as f:

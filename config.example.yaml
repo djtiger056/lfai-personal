@@ -1,112 +1,183 @@
 server:
-  debug: false
   host: 0.0.0.0
   port: 8002
+  debug: false
+  log_level: info
 
 cors:
   allow_origins:
-    - http://localhost:3000
+    - http://127.0.0.1
+    - http://localhost
     - http://127.0.0.1:3000
-    - http://localhost:5173
+    - http://localhost:3000
     - http://127.0.0.1:5173
+    - http://localhost:5173
+
+jwt_secret_key: CHANGE_ME_TO_A_LONG_RANDOM_SECRET
 
 admin:
-  enabled: true
-  api_key: change-me
+  api_key: CHANGE_ME_TO_A_LONG_RANDOM_ADMIN_TOKEN
+
+system_prompt: |
+  你是 LFBot，一个温柔、自然、会陪伴聊天的 AI 助手。
 
 llm:
   provider: openai
   api_base: https://api.openai.com/v1
-  api_key: your-llm-api-key
+  api_key: ""
   model: gpt-4o-mini
-  max_tokens: 900
-  temperature: 0.8
-  memory:
-    long_term_enabled: true
-    long_term_strategy: local
-    embedding_provider: openai
-    embedding_api_base: https://api.openai.com/v1
-    embedding_api_key: your-embedding-api-key
-    embedding_model: text-embedding-3-small
-    embedding_dimensions: 1536
+  temperature: 0.7
+  max_tokens: 2000
+  openai:
+    api_base: https://api.openai.com/v1
+    api_key: ""
+    model: gpt-4o-mini
+  siliconflow:
+    api_base: https://api.siliconflow.cn/v1
+    api_key: ""
+    model: deepseek-ai/DeepSeek-V3.2
+  deepseek:
+    api_base: https://api.deepseek.com/v1
+    api_key: ""
+    model: deepseek-chat
+  qwen:
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: ""
+    model: qwen-plus
+
+adapters:
+  console:
+    enabled: false
+  qq:
+    enabled: false
+    ws_url: ws://127.0.0.1:3001
+    bot_qq: ""
+    access_control:
+      enabled: false
+      mode: disabled
+      whitelist: []
+      blacklist: []
+      deny_message: 抱歉，你没有权限使用此机器人。
+  linyu:
+    enabled: false
+    base_url: http://127.0.0.1:8000
+    account: ""
+    password: ""
 
 tts:
   enabled: false
-  provider: qwen
+  probability: 1.0
+  provider: qihang
+  voice_only_when_tts: false
+  qihang:
+    api_key: ""
+    base_url: https://api.qhaigc.net/v1
+    voice: 柔情萝莉
   qwen:
-    api_key: your-tts-api-key
-    model: qwen-tts
+    api_key: ""
+    model: qwen-tts-latest
+    voice: longxiaochun_v2
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  segment_config:
+    enabled: true
+    max_segments: 1
+    delay_range: [0.5, 2.0]
+  randomization:
+    enabled: false
+  text_cleaning:
+    enabled: true
 
 asr:
   enabled: false
   provider: siliconflow
   siliconflow:
+    api_key: ""
     api_base: https://api.siliconflow.cn/v1
-    api_key: your-asr-api-key
-    model: TeleAI/TeleSpeechASR
+    model: FunAudioLLM/SenseVoiceSmall
     timeout: 30
+  qwen:
+    api_key: ""
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-asr-flash
+    timeout: 30
+  auto_send_to_llm: true
+  processing_message: 正在识别语音...
+  error_message: 语音识别失败，请稍后重试
 
 image_generation:
   enabled: false
   provider: modelscope
+  trigger_keywords:
+    - 生成图片
+    - 生图
+    - 画
   modelscope:
-    api_key: your-image-api-key
+    api_key: ""
     model: Tongyi-MAI/Z-Image-Turbo
+    base_url: https://api-inference.modelscope.cn/v1
     timeout: 120
+  yunwu:
+    api_key: ""
+    model: ""
+    base_url: https://yunwu.ai/v1
 
 vision:
   enabled: false
   provider: modelscope
+  auto_send_to_llm: true
   modelscope:
-    api_key: your-vision-api-key
+    api_key: ""
     model: Qwen/Qwen3-VL-30B-A3B-Instruct
+    base_url: https://api-inference.modelscope.cn/v1
     timeout: 120
 
 memory:
+  short_term_enabled: true
+  mid_term_enabled: true
   long_term_enabled: true
-  long_term_strategy: local
+  short_term_max_rounds: 50
+  summary_interval: 10
+  max_summaries: 10
+  rag_enabled: true
+  rag_top_k: 3
+  embedding_provider: local
+  embedding_model: all-MiniLM-L6-v2
+  pipeline_enabled: false
+  summarizer_enabled: false
 
 emotes:
-  enabled: true
-  base_path: backend/data/emotes
-  file_extensions:
-    - png
-    - jpg
-    - jpeg
-    - gif
-    - webp
+  enabled: false
+  send_probability: 0.25
+  base_path: data/emotes
+  max_per_message: 1
   categories: []
 
-adapters:
-  console:
-    enabled: true
-  qq:
-    enabled: false
-    ws_host: 127.0.0.1
-    ws_port: 3001
-  linyu:
-    enabled: false
-    http_host: 127.0.0.1
-    http_port: 9200
-    ws_host: 127.0.0.1
-    ws_port: 9100
+prompt_enhancer:
+  enabled: false
+  custom_word_bank_path: data/custom_prompt_words.yaml
 
 proactive_chat:
   enabled: false
-
-clock:
   timezone: Asia/Shanghai
+  check_interval_seconds: 60
+  behavior_rules:
+    enabled: true
+    global_cooldown_seconds: 1800
+    inactive_greeting:
+      enabled: true
+      after_seconds: 21600
+      min_user_messages: 1
+      instruction: ""
+    conversation_follow_up:
+      enabled: true
+      after_seconds: 900
+      min_user_messages: 1
+      instruction: ""
+  targets: []
 
 reminder:
   enabled: true
   check_interval: 60
 
-mcp:
-  enabled: true
-
-prompt_enhancer:
-  enabled: true
-
 voice_gateway:
   enabled: false
-

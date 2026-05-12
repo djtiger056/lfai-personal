@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from ..core.bot import Bot
 from ..config import config
+from ..api import proactive as proactive_api
 from ..core.gen_img_parser import extract_gen_img_prompt
 from ..utils.text_splitter import smart_split_text
 from ..voice_call import VoiceCallManager, VoiceCallConfig
@@ -470,11 +471,13 @@ class LinyuAdapter:
             return
 
         try:
+            proactive_api.record_user_activity("linyu_private", user_id, user_id, text_content)
             response = await self._stream_reply_by_sentence(
                 user_id=user_id,
                 prompt=text_content,
                 session_id=user_id,
             )
+            proactive_api.record_assistant_activity("linyu_private", user_id, user_id, response)
             log_response = response[:200] + "..." if len(response) > 200 else response
             print(f"🤖 Linyu AI回复 -> {user_id}: {log_response}")
             last_image = self.bot.get_last_generated_image()
@@ -580,11 +583,13 @@ class LinyuAdapter:
             user_message_parts.append(f"{instruction_text}\n\n{recognition_text}")
             user_message = "\n\n".join(user_message_parts)
 
+            proactive_api.record_user_activity("linyu_private", user_id, user_id, user_message)
             llm_response = await self._stream_reply_by_sentence(
                 user_id=user_id,
                 prompt=user_message,
                 session_id=user_id,
             )
+            proactive_api.record_assistant_activity("linyu_private", user_id, user_id, llm_response)
 
             audio_data = None
             try:
@@ -638,11 +643,13 @@ class LinyuAdapter:
                 await self.send_private_message(user_id, asr_config.error_message)
                 return
 
+            proactive_api.record_user_activity("linyu_private", user_id, user_id, transcription_text)
             llm_response = await self._stream_reply_by_sentence(
                 user_id=user_id,
                 prompt=transcription_text,
                 session_id=user_id,
             )
+            proactive_api.record_assistant_activity("linyu_private", user_id, user_id, llm_response)
 
             audio_reply = None
             try:

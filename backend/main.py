@@ -12,8 +12,10 @@ if sys.platform.startswith("win"):
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from backend.core.bot import Bot
 from backend.adapters.console import ConsoleAdapter
 from backend.adapters.qq import QQAdapter
@@ -86,9 +88,33 @@ app.include_router(admin_users_router)
 app.include_router(voice_session_router)
 
 
+@app.get("/api/health")
+async def health():
+    """健康检查接口"""
+    return {"status": "ok", "message": "LFBot API Server"}
+
+
 @app.get("/")
-async def root():
+async def root(request: Request):
+    """根路径：浏览器访问返回前端页面，其他返回 API 信息"""
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and _frontend_dist.is_dir():
+        return FileResponse(str(_frontend_dist / "index.html"))
     return {"message": "LFBot API Server"}
+
+
+# ---- 前端静态文件服务 ----
+_frontend_dist = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+if _frontend_dist.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="static-assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(request: Request, full_path: str):
+        """SPA catch-all：非 /api 路径一律返回 index.html"""
+        file_path = _frontend_dist / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(_frontend_dist / "index.html"))
 
 
 async def start_adapters():
@@ -104,18 +130,17 @@ async def start_adapters():
         import backend.api.vision
         import backend.api.image_gen
         import backend.api.chat
+        import backend.api.asr
 
         backend.api.vision.bot_instance = bot
         backend.api.image_gen.bot_instance = bot
         backend.api.chat._bot_instance = bot
+        backend.api.asr.bot_instance = bot
 
         print("✓ 全局 Bot 实例已设置到所有 API 模块")
 
         # 初始化主动聊天调度器
-        proactive_scheduler: Optional[ProactiveChatScheduler] = None
-        proactive_cfg = config.proactive_chat_config or {}
-        if proactive_cfg.get("enabled", False):
-            proactive_scheduler = ProactiveChatScheduler(bot)
+        proactive_scheduler: Optional[ProactiveChatScheduler] = ProactiveChatScheduler(bot)
 
         # 初始化待办事项调度器
         reminder_scheduler: Optional[ReminderScheduler] = None
@@ -155,6 +180,12 @@ async def start_adapters():
 
         adapters_config = config.adapters_config
         tasks: list[asyncio.Task] = []
+
+        if proactive_scheduler:
+            async def _send_web_message(target: dict, payload):
+                await proactive_scheduler.enqueue_web_message(target, payload)
+
+            proactive_scheduler.register_sender("web", _send_web_message)
 
         # 控制台适配器
         console_adapter: Optional[ConsoleAdapter] = None

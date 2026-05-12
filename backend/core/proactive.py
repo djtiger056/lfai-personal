@@ -1,8 +1,9 @@
 import asyncio
+import base64
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Any, Dict, Optional, Callable, List, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from ..config import config
@@ -22,10 +23,25 @@ class ProactiveTargetState:
     windows: Dict[str, WindowState] = field(default_factory=dict)
     images_sent_today: int = 0
     image_quota_date: Optional[datetime] = None
+    activity: Dict[str, Any] = field(default_factory=dict)
+    web_pending_messages: List[Dict[str, Any]] = field(default_factory=list)
+    next_web_message_id: int = 1
 
 
 class ProactiveChatScheduler:
     """主动聊天调度器，按照配置定期触发 Bot 主动问候。"""
+
+    _conversation_end_keywords = (
+        "晚安", "拜拜", "下次聊", "先这样", "先不聊", "先忙", "回头聊", "睡了", "88", "bye", "good night"
+    )
+    _follow_up_phrases = (
+        "然后呢", "后来呢", "你呢", "要不要", "想不想", "等你", "回我", "记得告诉我",
+        "方便的话", "有空的话", "跟我说说", "展开讲讲", "我想听", "和我说"
+    )
+    _open_topic_keywords = (
+        "明天", "待会", "等会", "之后", "最近", "项目", "工作", "考试", "面试", "生病",
+        "睡不着", "回家", "旅行", "聚会", "计划", "准备", "纠结", "担心", "烦", "开心"
+    )
 
     def __init__(self, bot):
         self.bot = bot
@@ -33,11 +49,11 @@ class ProactiveChatScheduler:
         self.task: Optional[asyncio.Task] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         # 发送器可接受文本或携带图片的 payload
-        self.senders: Dict[str, Callable[[Dict[str, Any], Union[str, Dict[str, Any]]], asyncio.Future]] = {}
+        self.senders: Dict[str, Callable[[Dict[str, Any], Union[str, Dict[str, Any]]], Awaitable[None]]] = {}
         self.target_state: Dict[str, ProactiveTargetState] = {}
         self._config: Dict[str, Any] = config.proactive_chat_config or {}
 
-    def register_sender(self, channel: str, sender: Callable[[Dict[str, Any], Union[str, Dict[str, Any]]], asyncio.Future]):
+    def register_sender(self, channel: str, sender: Callable[[Dict[str, Any], Union[str, Dict[str, Any]]], Awaitable[None]]):
         """注册发送器（例如 QQ 私聊）。sender 接受 target dict 与文本或包含 image 的 payload。"""
         self.senders[channel] = sender
 
@@ -66,6 +82,134 @@ class ProactiveChatScheduler:
         self.target_state = {}
         print("[Proactive] 配置已重新加载")
 
+    def _now(self) -> datetime:
+        tz = self._get_timezone()
+        return datetime.now(tz) if tz else datetime.now()
+
+    def _compose_target_key(self, channel: str, user_id: str, session_id: Optional[str] = None) -> str:
+        normalized_session = session_id or user_id
+        return f"{channel}:{user_id}:{normalized_session}"
+
+    def _get_or_create_state(self, channel: str, user_id: str, session_id: Optional[str] = None) -> ProactiveTargetState:
+        key = self._compose_target_key(channel, user_id, session_id)
+        return self.target_state.setdefault(key, ProactiveTargetState())
+
+    def _ensure_activity_state(self, state: ProactiveTargetState) -> Dict[str, Any]:
+        activity = state.activity
+        if not activity:
+            activity.update({
+                "last_user_message_at": None,
+                "last_assistant_message_at": None,
+                "last_user_message": "",
+                "last_assistant_message": "",
+                "total_user_messages": 0,
+                "total_assistant_messages": 0,
+                "pending_follow_up_due_at": None,
+                "pending_follow_up_reason": None,
+                "pending_follow_up_reference_at": None,
+                "last_follow_up_sent_at": None,
+                "last_inactivity_sent_at": None,
+                "inactivity_triggered_for_user_at": None,
+            })
+        return activity
+
+    def record_user_activity(
+        self,
+        channel: str,
+        user_id: str,
+        session_id: Optional[str],
+        message: Optional[str],
+    ):
+        if not user_id:
+            return
+        state = self._get_or_create_state(channel, user_id, session_id)
+        activity = self._ensure_activity_state(state)
+        now = self._now()
+        activity["last_user_message_at"] = now
+        activity["last_user_message"] = str(message or "").strip()
+        activity["total_user_messages"] = int(activity.get("total_user_messages", 0) or 0) + 1
+        activity["pending_follow_up_due_at"] = None
+        activity["pending_follow_up_reason"] = None
+        activity["pending_follow_up_reference_at"] = None
+
+    def record_assistant_activity(
+        self,
+        channel: str,
+        user_id: str,
+        session_id: Optional[str],
+        message: Optional[str],
+        allow_follow_up: bool = True,
+    ):
+        if not user_id:
+            return
+        state = self._get_or_create_state(channel, user_id, session_id)
+        activity = self._ensure_activity_state(state)
+        now = self._now()
+        normalized_message = str(message or "").strip()
+        activity["last_assistant_message_at"] = now
+        activity["last_assistant_message"] = normalized_message
+        activity["total_assistant_messages"] = int(activity.get("total_assistant_messages", 0) or 0) + 1
+
+        if allow_follow_up:
+            follow_up_reason = self._should_schedule_conversation_follow_up(
+                str(activity.get("last_user_message") or ""),
+                normalized_message,
+            )
+            follow_up_cfg = self._follow_up_rules()
+            if follow_up_reason and follow_up_cfg.get("enabled", True):
+                delay_seconds = self._safe_int(follow_up_cfg.get("after_seconds"), 900, minimum=30)
+                activity["pending_follow_up_due_at"] = now + timedelta(seconds=delay_seconds)
+                activity["pending_follow_up_reason"] = follow_up_reason
+                activity["pending_follow_up_reference_at"] = now
+            else:
+                activity["pending_follow_up_due_at"] = None
+                activity["pending_follow_up_reason"] = None
+                activity["pending_follow_up_reference_at"] = None
+        else:
+            activity["pending_follow_up_due_at"] = None
+            activity["pending_follow_up_reason"] = None
+            activity["pending_follow_up_reference_at"] = None
+
+    def poll_pending_messages(
+        self,
+        channel: str,
+        user_id: str,
+        session_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        state = self.target_state.get(self._compose_target_key(channel, user_id, session_id))
+        if not state or not state.web_pending_messages:
+            return []
+        safe_limit = self._safe_int(limit, 20, minimum=1)
+        messages = state.web_pending_messages[:safe_limit]
+        state.web_pending_messages = state.web_pending_messages[safe_limit:]
+        return messages
+
+    async def enqueue_web_message(self, target: Dict[str, Any], payload: Union[str, Dict[str, Any]]):
+        user_id = target.get("user_id") or "web_user"
+        session_id = target.get("session_id") or user_id
+        state = self._get_or_create_state("web", user_id, session_id)
+        now = self._now()
+        message_payload: Dict[str, Any] = {
+            "id": f"web-{state.next_web_message_id}",
+            "created_at": now.isoformat(),
+            "source": "proactive",
+        }
+        state.next_web_message_id += 1
+
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or "").strip()
+            if text:
+                message_payload["content"] = text
+            image_bytes = payload.get("image")
+            if isinstance(image_bytes, (bytes, bytearray)):
+                message_payload["image_base64"] = base64.b64encode(image_bytes).decode("utf-8")
+        else:
+            message_payload["content"] = str(payload)
+
+        if message_payload.get("content") or message_payload.get("image_base64"):
+            state.web_pending_messages.append(message_payload)
+
     def run_coro_threadsafe(self, coro):
         """供其他线程调用的安全入口。"""
         if self.loop and self.loop.is_running():
@@ -93,8 +237,7 @@ class ProactiveChatScheduler:
         if not targets:
             return
 
-        tz = self._get_timezone()
-        now = datetime.now(tz) if tz else datetime.now()
+        now = self._now()
 
         # 检查待办事项
         await self._check_and_trigger_reminders(now)
@@ -102,6 +245,8 @@ class ProactiveChatScheduler:
         for target in targets:
             key = self._target_key(target)
             state = self.target_state.setdefault(key, ProactiveTargetState())
+            if await self._check_behavior_rules(target, state, now):
+                continue
             windows = self._resolve_time_windows(target)
             if not windows:
                 continue
@@ -135,6 +280,7 @@ class ProactiveChatScheduler:
                         instruction,
                         state=state,
                         window_state=window_state,
+                        respect_global_cooldown=True,
                     )
 
     async def _send_proactive_message(
@@ -143,6 +289,7 @@ class ProactiveChatScheduler:
         instruction: str,
         state: Optional[ProactiveTargetState] = None,
         window_state: Optional[WindowState] = None,
+        respect_global_cooldown: bool = False,
     ) -> str:
         channel = target.get("channel", "qq_private")
         sender = self.senders.get(channel)
@@ -157,6 +304,9 @@ class ProactiveChatScheduler:
         # 计数器重置（按日）
         state = state or self.target_state.setdefault(self._target_key(target), ProactiveTargetState())
         self._reset_image_quota(state)
+
+        if respect_global_cooldown and not self._can_send_by_global_cooldown(state, self._now()):
+            return "[Proactive] 命中全局冷却，跳过发送"
 
         if display_name:
             instruction = f"对方昵称：{display_name}\n{instruction}"
@@ -177,8 +327,9 @@ class ProactiveChatScheduler:
         await sender(target, payload)
 
         # 更新状态
-        now = datetime.now(self._get_timezone()) if self._get_timezone() else datetime.now()
+        now = self._now()
         state.last_sent = now
+        self.record_assistant_activity(channel, user_id, session_id, self._payload_text(payload), allow_follow_up=False)
         if window_state:
             window_state.last_sent = now
             window_state.sent_today += 1
@@ -215,6 +366,193 @@ class ProactiveChatScheduler:
             instruction = f"{instruction}\n可参考灵感：{random.choice(templates)}"
 
         return instruction
+
+    async def _check_behavior_rules(
+        self,
+        target: Dict[str, Any],
+        state: ProactiveTargetState,
+        now: datetime,
+    ) -> bool:
+        activity = self._ensure_activity_state(state)
+        if not activity.get("last_user_message_at"):
+            return False
+        if not self._behavior_rules().get("enabled", True):
+            return False
+        if not self._can_send_by_global_cooldown(state, now):
+            return False
+
+        follow_up_instruction = self._build_follow_up_instruction(target, state, now)
+        if follow_up_instruction:
+            await self._send_proactive_message(
+                target,
+                follow_up_instruction,
+                state=state,
+                respect_global_cooldown=True,
+            )
+            activity["last_follow_up_sent_at"] = now
+            activity["pending_follow_up_due_at"] = None
+            activity["pending_follow_up_reason"] = None
+            activity["pending_follow_up_reference_at"] = None
+            return True
+
+        inactivity_instruction = self._build_inactivity_instruction(target, state, now)
+        if inactivity_instruction:
+            await self._send_proactive_message(
+                target,
+                inactivity_instruction,
+                state=state,
+                respect_global_cooldown=True,
+            )
+            activity["last_inactivity_sent_at"] = now
+            activity["inactivity_triggered_for_user_at"] = activity.get("last_user_message_at")
+            return True
+
+        return False
+
+    def _behavior_rules(self) -> Dict[str, Any]:
+        return self._config.get("behavior_rules", {}) or {}
+
+    def _inactive_rules(self) -> Dict[str, Any]:
+        return self._behavior_rules().get("inactive_greeting", {}) or {}
+
+    def _follow_up_rules(self) -> Dict[str, Any]:
+        return self._behavior_rules().get("conversation_follow_up", {}) or {}
+
+    def _safe_int(self, value: Any, default: int, minimum: int = 0) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, parsed)
+
+    def _can_send_by_global_cooldown(self, state: ProactiveTargetState, now: datetime) -> bool:
+        cooldown_seconds = self._safe_int(self._behavior_rules().get("global_cooldown_seconds"), 1800, minimum=0)
+        if cooldown_seconds <= 0 or not state.last_sent:
+            return True
+        return (now - state.last_sent).total_seconds() >= cooldown_seconds
+
+    def _payload_text(self, payload: Union[str, Dict[str, Any]]) -> str:
+        if isinstance(payload, dict):
+            return str(payload.get("text") or "").strip()
+        return str(payload or "").strip()
+
+    def _build_follow_up_instruction(
+        self,
+        target: Dict[str, Any],
+        state: ProactiveTargetState,
+        now: datetime,
+    ) -> str:
+        cfg = self._follow_up_rules()
+        if not cfg.get("enabled", True):
+            return ""
+        activity = self._ensure_activity_state(state)
+        due_at = activity.get("pending_follow_up_due_at")
+        reference_at = activity.get("pending_follow_up_reference_at")
+        last_user_at = activity.get("last_user_message_at")
+        last_assistant_at = activity.get("last_assistant_message_at")
+        if not due_at or not reference_at or not last_user_at or not last_assistant_at:
+            return ""
+        if now < due_at:
+            return ""
+        if last_user_at > last_assistant_at:
+            return ""
+        if activity.get("total_user_messages", 0) < self._safe_int(cfg.get("min_user_messages"), 1, minimum=1):
+            return ""
+        if activity.get("last_follow_up_sent_at") and activity["last_follow_up_sent_at"] >= reference_at:
+            return ""
+
+        silent_for = self._humanize_gap(now - last_assistant_at)
+        topic_summary = self._shorten_text(activity.get("last_user_message") or "", 90)
+        last_reply = self._shorten_text(activity.get("last_assistant_message") or "", 120)
+        custom_instruction = str(cfg.get("instruction") or "").strip()
+        parts = [
+            custom_instruction or "请像真实伴侣一样，自然续上刚才没聊完的话题，用1-2句轻轻追一句，不要像系统提醒。",
+            f"距离你上一句发出后，对方已经安静了大约 {silent_for}。",
+        ]
+        if topic_summary:
+            parts.append(f"用户刚才提到：{topic_summary}")
+        if last_reply:
+            parts.append(f"你上一句大意：{last_reply}")
+        parts.append("延续刚才的话题，不要重新开场，不要重复整段上下文，不要直接说“检测到你没回复”。")
+        return "\n".join(parts)
+
+    def _build_inactivity_instruction(
+        self,
+        target: Dict[str, Any],
+        state: ProactiveTargetState,
+        now: datetime,
+    ) -> str:
+        cfg = self._inactive_rules()
+        if not cfg.get("enabled", True):
+            return ""
+        activity = self._ensure_activity_state(state)
+        last_user_at = activity.get("last_user_message_at")
+        if not last_user_at:
+            return ""
+        min_user_messages = self._safe_int(cfg.get("min_user_messages"), 1, minimum=1)
+        if activity.get("total_user_messages", 0) < min_user_messages:
+            return ""
+        after_seconds = self._safe_int(cfg.get("after_seconds"), 21600, minimum=60)
+        if (now - last_user_at).total_seconds() < after_seconds:
+            return ""
+        if activity.get("inactivity_triggered_for_user_at") == last_user_at:
+            return ""
+        last_assistant_at = activity.get("last_assistant_message_at")
+        if last_assistant_at and last_user_at > last_assistant_at:
+            return ""
+
+        silent_for = self._humanize_gap(now - last_user_at)
+        topic_summary = self._shorten_text(activity.get("last_user_message") or "", 90)
+        custom_instruction = str(cfg.get("instruction") or "").strip()
+        parts = [
+            custom_instruction or "请主动发一条自然的关心问候，像恋人想起对方时顺手发来的消息，语气轻松，不要太正式。",
+            f"对方已经大约 {silent_for} 没来找你聊天了。",
+        ]
+        if topic_summary:
+            parts.append(f"他上次提到过：{topic_summary}")
+        parts.append("可以自然表达想念、关心近况或延续一点熟悉感，但不要显得催促，也不要说自己在执行规则。")
+        return "\n".join(parts)
+
+    def _should_schedule_conversation_follow_up(self, last_user_message: str, assistant_message: str) -> Optional[str]:
+        user_text = str(last_user_message or "").strip().lower()
+        assistant_text = str(assistant_message or "").strip().lower()
+        if not user_text or not assistant_text:
+            return None
+        if any(keyword.lower() in user_text for keyword in self._conversation_end_keywords):
+            return None
+        if any(keyword.lower() in assistant_text for keyword in self._conversation_end_keywords):
+            return None
+        if "?" in assistant_text or "？" in assistant_text:
+            return "assistant_question"
+        if any(phrase.lower() in assistant_text for phrase in self._follow_up_phrases):
+            return "assistant_open_loop"
+        if len(user_text) >= 8 and any(keyword.lower() in user_text for keyword in self._open_topic_keywords):
+            return "user_open_topic"
+        return None
+
+    def _shorten_text(self, text: str, limit: int = 80) -> str:
+        normalized = " ".join(str(text or "").strip().split())
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(0, limit - 1)] + "…"
+
+    def _humanize_gap(self, delta: timedelta) -> str:
+        total_seconds = max(0, int(delta.total_seconds()))
+        if total_seconds < 60:
+            return f"{total_seconds} 秒"
+        if total_seconds < 3600:
+            return f"{max(1, total_seconds // 60)} 分钟"
+        if total_seconds < 86400:
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            if minutes:
+                return f"{hours} 小时 {minutes} 分钟"
+            return f"{hours} 小时"
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        if hours:
+            return f"{days} 天 {hours} 小时"
+        return f"{days} 天"
 
     def _resolve_time_windows(self, target: Dict[str, Any]) -> List[Dict[str, Any]]:
         """兼容多时间段配置，支持旧 daily_window 结构"""
@@ -315,11 +653,14 @@ class ProactiveChatScheduler:
             return None
 
     def _target_key(self, target: Dict[str, Any]) -> str:
-        return f"{target.get('channel', '')}:{target.get('user_id', '')}:{target.get('session_id', '')}"
+        channel = str(target.get("channel", "") or "")
+        user_id = str(target.get("user_id", "") or "")
+        session_id = str(target.get("session_id") or user_id)
+        return self._compose_target_key(channel, user_id, session_id)
 
     def _reset_image_quota(self, state: ProactiveTargetState):
         """按日重置生图计数"""
-        now = datetime.now(self._get_timezone()) if self._get_timezone() else datetime.now()
+        now = self._now()
         if state.image_quota_date is None or state.image_quota_date.date() != now.date():
             state.images_sent_today = 0
             state.image_quota_date = now
@@ -467,7 +808,9 @@ class ProactiveChatScheduler:
         """根据用户ID查找对应的target配置"""
         targets: List[Dict[str, Any]] = self._config.get("targets", [])
         for target in targets:
-            if target.get("user_id") == user_id and target.get("session_id") == session_id:
+            target_user_id = target.get("user_id")
+            target_session_id = target.get("session_id") or target_user_id
+            if target_user_id == user_id and target_session_id == session_id:
                 return target
         return None
 
@@ -476,11 +819,25 @@ class ProactiveChatScheduler:
             "enabled": self._config.get("enabled", False),
             "running": self.running,
             "targets": len(self._config.get("targets", []) or []),
+            "behavior_rules": self._behavior_rules(),
             "targets_state": {
                 key: {
                     "last_sent": state.last_sent.isoformat() if state.last_sent else None,
                     "images_sent_today": state.images_sent_today,
                     "image_quota_date": state.image_quota_date.isoformat() if state.image_quota_date else None,
+                    "pending_web_messages": len(state.web_pending_messages),
+                    "activity": {
+                        "last_user_message_at": state.activity.get("last_user_message_at").isoformat() if state.activity.get("last_user_message_at") else None,
+                        "last_assistant_message_at": state.activity.get("last_assistant_message_at").isoformat() if state.activity.get("last_assistant_message_at") else None,
+                        "last_user_message": state.activity.get("last_user_message"),
+                        "last_assistant_message": state.activity.get("last_assistant_message"),
+                        "total_user_messages": state.activity.get("total_user_messages", 0),
+                        "total_assistant_messages": state.activity.get("total_assistant_messages", 0),
+                        "pending_follow_up_due_at": state.activity.get("pending_follow_up_due_at").isoformat() if state.activity.get("pending_follow_up_due_at") else None,
+                        "pending_follow_up_reason": state.activity.get("pending_follow_up_reason"),
+                        "last_follow_up_sent_at": state.activity.get("last_follow_up_sent_at").isoformat() if state.activity.get("last_follow_up_sent_at") else None,
+                        "last_inactivity_sent_at": state.activity.get("last_inactivity_sent_at").isoformat() if state.activity.get("last_inactivity_sent_at") else None,
+                    },
                     "windows": {
                         w_key: {
                             "scheduled_time": ws.scheduled_time.isoformat() if ws.scheduled_time else None,

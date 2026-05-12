@@ -1,7 +1,7 @@
 """用户认证工具类"""
 import hashlib
 import jwt
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional, Dict, Any
 from backend.config import config
 from backend.utils.datetime_utils import get_now
@@ -9,15 +9,17 @@ from backend.utils.datetime_utils import get_now
 
 class AuthManager:
     """认证管理器"""
-    
-    # JWT 配置
-    SECRET_KEY = config.get('jwt_secret_key', 'your-secret-key-change-this-in-production')
+
+    @property
+    def SECRET_KEY(self) -> str:
+        return config.get('jwt_secret_key', 'your-secret-key-change-this-in-production')
+
     ALGORITHM = 'HS256'
     TOKEN_EXPIRE_HOURS = 24 * 7  # 7天过期
-    
+
     @staticmethod
     def hash_password(password: str) -> str:
-        """密码哈希"""
+
         return hashlib.sha256(password.encode()).hexdigest()
     
     @staticmethod

@@ -1,20 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { Card, Input, Button, message, Spin, Typography, Alert } from 'antd'
-import { SendOutlined, RobotOutlined, UserOutlined } from '@ant-design/icons'
+import React, { useEffect, useRef, useState } from 'react'
+import { Alert, Button, Card, Input, message, Spin } from 'antd'
+import { RobotOutlined, SendOutlined, UserOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
-const { TextArea } = Input
-const { Title } = Typography
+import { proactiveApi } from '@/services/api'
 
-interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  timestamp: Date
-  emote?: ChatEmote
-}
+const { TextArea } = Input
+const WEB_USER_ID = 'web_user'
+const WEB_SESSION_ID = 'web_user'
+const PROACTIVE_POLL_INTERVAL = 10000
 
 interface ChatEmote {
   category: string
@@ -24,12 +20,23 @@ interface ChatEmote {
   matched_keywords?: string[]
 }
 
+interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: Date
+  emote?: ChatEmote
+  imageDataUrl?: string
+  source?: 'dialogue' | 'proactive'
+}
+
 const ChatPage: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const seenProactiveIdsRef = useRef<Set<string>>(new Set())
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -38,6 +45,55 @@ const ChatPage: React.FC = () => {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  useEffect(() => {
+    let active = true
+
+    const pollMessages = async () => {
+      if (!active || streaming) {
+        return
+      }
+      try {
+        const payloads = await proactiveApi.pollMessages({
+          channel: 'web',
+          user_id: WEB_USER_ID,
+          session_id: WEB_SESSION_ID,
+          limit: 20,
+        })
+
+        const nextMessages: ChatMessage[] = (payloads || [])
+          .filter((item: any) => {
+            const id = String(item?.id || '')
+            if (!id || seenProactiveIdsRef.current.has(id)) {
+              return false
+            }
+            seenProactiveIdsRef.current.add(id)
+            return true
+          })
+          .map((item: any) => ({
+            id: String(item.id),
+            role: 'assistant',
+            content: String(item.content || ''),
+            timestamp: item.created_at ? new Date(item.created_at) : new Date(),
+            source: 'proactive',
+            imageDataUrl: item.image_base64 ? `data:image/png;base64,${item.image_base64}` : undefined,
+          }))
+
+        if (active && nextMessages.length > 0) {
+          setMessages(prev => [...prev, ...nextMessages])
+        }
+      } catch (error) {
+        console.error('poll proactive messages failed:', error)
+      }
+    }
+
+    pollMessages()
+    const timer = window.setInterval(pollMessages, PROACTIVE_POLL_INTERVAL)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [streaming])
 
   const handleSend = async () => {
     if (!input.trim()) return
@@ -58,6 +114,7 @@ const ChatPage: React.FC = () => {
       role: 'user',
       content: input,
       timestamp: new Date(),
+      source: 'dialogue',
     }
 
     setMessages(prev => [...prev, userMessage])
@@ -66,7 +123,6 @@ const ChatPage: React.FC = () => {
     setStreaming(true)
 
     try {
-      // 模拟流式回复
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: {
@@ -74,7 +130,8 @@ const ChatPage: React.FC = () => {
         },
         body: JSON.stringify({
           message: input,
-          user_id: 'web_user'
+          user_id: WEB_USER_ID,
+          session_id: WEB_SESSION_ID,
         }),
       })
       markClient('response_headers_received')
@@ -88,6 +145,7 @@ const ChatPage: React.FC = () => {
         role: 'assistant',
         content: '',
         timestamp: new Date(),
+        source: 'dialogue',
       }
 
       setMessages(prev => [...prev, botMessage])
@@ -148,11 +206,23 @@ const ChatPage: React.FC = () => {
                   )
                 )
               }
+
+              if (parsed.image) {
+                setMessages(prev =>
+                  prev.map(msg =>
+                    msg.id === botMessage.id
+                      ? { ...msg, imageDataUrl: `data:image/png;base64,${parsed.image}` }
+                      : msg
+                  )
+                )
+              }
+
               if (parsed.audio) {
                 const mime = parsed.audio_mime || 'audio/mpeg'
                 const audio = new Audio(`data:${mime};base64,${parsed.audio}`)
                 audio.play().catch(e => console.error('Audio play error:', e))
               }
+
               if (parsed.emote) {
                 const emoteData: any = parsed.emote
                 const dataUrl = emoteData.data_url || (emoteData.base64_data ? `data:${emoteData.mime_type || 'image/png'};base64,${emoteData.base64_data}` : '')
@@ -204,6 +274,12 @@ const ChatPage: React.FC = () => {
 
   return (
     <Card title="聊天测试" style={{ height: 'calc(100vh - 200px)' }}>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="本页会自动轮询并展示 AI 主动消息。若要让 Web 端收得到，请在“主动聊天”页配置 channel=`web`、user_id=`web_user`、session_id=`web_user`。"
+      />
       <div className="chat-messages" style={{ height: 'calc(100% - 120px)', overflowY: 'auto', padding: '16px' }}>
         {messages.map((msg) => (
           <div
@@ -217,19 +293,24 @@ const ChatPage: React.FC = () => {
               ) : (
                 <RobotOutlined style={{ fontSize: '16px', marginTop: '4px' }} />
               )}
-              <div className="message-content" style={{ 
+              <div className="message-content" style={{
                 background: msg.role === 'user' ? '#1890ff' : '#f0f0f0',
                 color: msg.role === 'user' ? 'white' : '#333',
                 padding: '8px 12px',
                 borderRadius: '8px',
                 maxWidth: '70%',
-                wordWrap: 'break-word'
+                wordWrap: 'break-word',
               }}>
                 {msg.role === 'assistant' ? (
                   <>
+                    {msg.source === 'proactive' && (
+                      <div style={{ fontSize: '12px', color: '#999', marginBottom: '6px' }}>
+                        主动消息
+                      </div>
+                    )}
                     <ReactMarkdown
                       components={{
-                        code({ node, inline, className, children, ...props }: any) {
+                        code({ inline, className, children, ...props }: any) {
                           const match = /language-(\w+)/.exec(className || '')
                           return !inline && match ? (
                             <SyntaxHighlighter
@@ -250,6 +331,15 @@ const ChatPage: React.FC = () => {
                     >
                       {msg.content}
                     </ReactMarkdown>
+                    {msg.imageDataUrl && (
+                      <div style={{ marginTop: '8px' }}>
+                        <img
+                          src={msg.imageDataUrl}
+                          alt="assistant generated"
+                          style={{ maxWidth: '220px', borderRadius: '8px', display: 'block' }}
+                        />
+                      </div>
+                    )}
                     {msg.emote && msg.emote.data_url && (
                       <div style={{ marginTop: '8px' }}>
                         <img
@@ -281,13 +371,13 @@ const ChatPage: React.FC = () => {
         )}
         <div ref={messagesEndRef} />
       </div>
-      
-      <div className="chat-input" style={{ 
-        position: 'sticky', 
-        bottom: 0, 
-        background: 'white', 
-        padding: '16px', 
-        borderTop: '1px solid #f0f0f0' 
+
+      <div className="chat-input" style={{
+        position: 'sticky',
+        bottom: 0,
+        background: 'white',
+        padding: '16px',
+        borderTop: '1px solid #f0f0f0',
       }}>
         <div style={{ display: 'flex', gap: '8px' }}>
           <TextArea
@@ -298,8 +388,8 @@ const ChatPage: React.FC = () => {
             autoSize={{ minRows: 2, maxRows: 4 }}
             disabled={loading}
           />
-          <Button 
-            type="primary" 
+          <Button
+            type="primary"
             icon={<SendOutlined />}
             onClick={handleSend}
             loading={loading}
