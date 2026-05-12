@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, validator
 
-from .chat import get_bot
+from .bot_provider import get_bot
 from backend.mcp.daily_habits import DailyHabitsPlugin
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])

@@ -5,7 +5,7 @@ import yaml
 from pathlib import Path
 import logging
 from ..config import config
-from .chat import reset_bot
+from .bot_provider import reset_bot
 
 logger = logging.getLogger(__name__)
 

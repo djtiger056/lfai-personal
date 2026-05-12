@@ -5,17 +5,8 @@ import base64
 
 from ..core.bot import Bot
 from backend.api.deps import get_access_token
+from backend.api.bot_provider import get_bot
 from backend.user.auth import auth_manager
-
-bot_instance = None
-
-
-def get_bot() -> Bot:
-    """获取Bot实例"""
-    global bot_instance
-    if bot_instance is None:
-        bot_instance = Bot()
-    return bot_instance
 
 
 router = APIRouter(prefix="/api/image-gen", tags=["图像生成"])

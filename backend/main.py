@@ -126,15 +126,12 @@ async def start_adapters():
 
         bot = Bot()
 
-        # 设置到各个 API 模块的全局变量
-        import backend.api.vision
-        import backend.api.image_gen
-        import backend.api.chat
-        import backend.api.asr
+        # 通过统一的 bot_provider 设置全局 Bot 实例
+        from backend.api.bot_provider import set_bot
+        set_bot(bot)
 
-        backend.api.vision.bot_instance = bot
-        backend.api.image_gen.bot_instance = bot
-        backend.api.chat._bot_instance = bot
+        # 兼容 asr 模块仍需直接引用 bot_instance 的场景
+        import backend.api.asr
         backend.api.asr.bot_instance = bot
 
         print("✓ 全局 Bot 实例已设置到所有 API 模块")

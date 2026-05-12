@@ -6,51 +6,9 @@ import json
 import time
 
 from . import proactive as proactive_api
+from .bot_provider import get_bot, reset_bot  # noqa: F401 — 保持向后兼容
 
 router = APIRouter(prefix="/api", tags=["chat"])
-
-# 共享Bot实例和当前LLM签名（用于热更新）
-_bot_instance = None
-_llm_signature = None
-
-def _current_llm_signature():
-    """生成当前LLM配置的签名，用于判断是否需要重建Bot"""
-    import json
-    from ..config import config
-
-    # 重新加载配置，确保与文件一致
-    config.refresh_from_file()
-
-    llm_cfg = config.llm_config
-    provider = llm_cfg.get('provider')
-    provider_cfg = llm_cfg.get(provider, {}) if isinstance(llm_cfg, dict) else {}
-
-    # 包含全局字段以及提供商专属字段变化
-    return (
-        provider,
-        llm_cfg.get('model'),
-        llm_cfg.get('api_base'),
-        llm_cfg.get('api_key'),
-        llm_cfg.get('temperature'),
-        llm_cfg.get('max_tokens'),
-        json.dumps(provider_cfg, sort_keys=True, ensure_ascii=False),
-    )
-
-def get_bot():
-    """获取共享Bot实例；LLM配置变化时自动重建"""
-    global _bot_instance, _llm_signature
-    signature = _current_llm_signature()
-    if _bot_instance is None or _llm_signature != signature:
-        from ..core.bot import Bot
-        _bot_instance = Bot()
-        _llm_signature = signature
-    return _bot_instance
-
-def reset_bot():
-    """重置Bot实例，方便在配置变更后重新创建"""
-    global _bot_instance, _llm_signature
-    _bot_instance = None
-    _llm_signature = None
 
 class ChatRequest(BaseModel):
     message: str

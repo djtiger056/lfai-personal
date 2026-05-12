@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..config import config
-from .chat import get_bot
+from .bot_provider import get_bot
 
 router = APIRouter(prefix="/api", tags=["reminder"])
 

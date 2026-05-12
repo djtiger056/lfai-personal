@@ -4,16 +4,7 @@ from typing import Dict, Any, Optional
 import base64
 
 from ..core.bot import Bot
-
-# 全局Bot实例
-bot_instance = None
-
-def get_bot() -> Bot:
-    """获取Bot实例"""
-    global bot_instance
-    if bot_instance is None:
-        bot_instance = Bot()
-    return bot_instance
+from backend.api.bot_provider import get_bot
 
 router = APIRouter(prefix="/api/vision", tags=["视觉识别"])
 
