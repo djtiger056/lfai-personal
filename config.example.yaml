@@ -65,6 +65,20 @@ daily_schedule_generation:
   #   temperature: 0.9
   #   max_tokens: 2000
 
+# Agent 委派配置 — 将任务委派给本地 Hermes Agent 执行
+agent_delegate:
+  enabled: false
+  hermes:
+    api_base: http://127.0.0.1:8642
+    api_key: change-me-local-dev
+    timeout: 300
+    poll_interval: 3
+    max_concurrent_tasks: 5
+    instructions: |
+      你是一个能干的助理。语气亲切自然，称呼用户"你"。
+      任务结果该正式就正式（代码用代码块），但可以在开头结尾带一点温度。
+      不要撒娇，不要用颜文字。简洁高效地完成任务。
+
 adapters:
   console:
     enabled: false

@@ -268,3 +268,32 @@ export const systemConfigProxy = {
     }
   },
 }
+
+
+/**
+ * 配置代理 - Agent 委派
+ */
+export const agentDelegateConfigProxy = {
+  getConfig: async () => {
+    if (isCurrentUserAdmin()) {
+      const response = await api.get('/agent-delegate/config')
+      return response.data.data
+    } else {
+      const userConfig = await userConfigApi.getConfig()
+      if (userConfig.agent_delegate && Object.keys(userConfig.agent_delegate).length > 0) {
+        return userConfig.agent_delegate
+      }
+      const response = await api.get('/agent-delegate/config')
+      return response.data.data
+    }
+  },
+
+  updateConfig: async (config: any) => {
+    if (isCurrentUserAdmin()) {
+      const response = await api.post('/agent-delegate/config', config)
+      return response.data
+    } else {
+      await userConfigApi.updateConfig({ agent_delegate: config })
+    }
+  },
+}

@@ -20,6 +20,7 @@ import {
   CrownOutlined,
   GlobalOutlined,
   DashboardOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import ChatPage from './pages/ChatPage'
 import SettingsPage from './pages/SettingsPage'
@@ -35,6 +36,7 @@ import DailySchedulePage from './pages/DailySchedulePage'
 import EmotePage from './pages/EmotePage'
 import ReminderPage from './pages/ReminderPage'
 import CerebellumPage from './pages/CerebellumPage'
+import AgentDelegatePage from './pages/AgentDelegatePage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import LoginPage from './pages/LoginPage'
 import AdminGlobalConfigPage from './pages/AdminGlobalConfigPage'
@@ -110,6 +112,11 @@ const MainLayout: React.FC = () => {
       key: '/cerebellum',
       icon: <DashboardOutlined />,
       label: '情绪系统',
+    },
+    {
+      key: '/agent-delegate',
+      icon: <RocketOutlined />,
+      label: 'Agent委派',
     },
   ]
 
@@ -236,6 +243,7 @@ const MainLayout: React.FC = () => {
             <Route path="/vision" element={<VisionPage />} />
             <Route path="/reminder" element={<ReminderPage />} />
             <Route path="/cerebellum" element={<CerebellumPage />} />
+            <Route path="/agent-delegate" element={<AgentDelegatePage />} />
             {/* 管理员路由 */}
             <Route path="/admin/global-config" element={
               <ProtectedRoute requireAdmin>

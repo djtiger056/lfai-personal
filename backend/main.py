@@ -44,6 +44,7 @@ from backend.api.admin_users import router as admin_users_router
 from backend.api.voice_session import router as voice_session_router
 from backend.api.daily_schedule import router as daily_schedule_router
 from backend.api.prompt import router as prompt_router
+from backend.api.agent_delegate import router as agent_delegate_router
 from backend.user import user_manager
 
 # 创建 FastAPI 应用
@@ -93,6 +94,7 @@ app.include_router(admin_users_router)
 app.include_router(voice_session_router)
 app.include_router(daily_schedule_router)
 app.include_router(prompt_router)
+app.include_router(agent_delegate_router)
 
 
 @app.get("/api/health")
@@ -272,6 +274,25 @@ async def start_adapters():
             print("🤖 主动聊天调度器已启动")
             if proactive_scheduler.task:
                 tasks.append(proactive_scheduler.task)
+
+        # 启动 Agent 委派器
+        if bot.agent_delegator and bot.agent_delegator.enabled:
+            # 将 proactive_scheduler 的 sender 复用为推送回调
+            if proactive_scheduler:
+                async def _delegate_push(target: dict, payload):
+                    """Agent 委派结果推送回调 — 复用已注册的 sender"""
+                    channel = target.get("channel", "web")
+                    sender = proactive_scheduler.senders.get(channel)
+                    if sender:
+                        await sender(target, payload)
+                    else:
+                        # 降级到 web 队列
+                        await proactive_scheduler.enqueue_web_message(target, payload)
+
+                bot.agent_delegator.set_push_callback(_delegate_push)
+
+            await bot.agent_delegator.start()
+            print("🚀 Agent 委派器已启动")
 
         if cerebellum_engine:
             await cerebellum_engine.start()
