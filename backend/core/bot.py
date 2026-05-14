@@ -126,6 +126,8 @@ class Bot:
 
         # 初始化 Agent 委派器
         self.agent_delegator: Optional[AgentDelegator] = None
+        # session/user -> channel 映射，由 adapter 注册
+        self._session_channel_map: Dict[str, str] = {}
         try:
             delegate_config = config.agent_delegate_config
             if delegate_config.enabled:
@@ -1029,13 +1031,17 @@ class Bot:
     def _resolve_channel(self, user_id: str, session_id: Optional[str] = None) -> str:
         """根据 session_id 推断推送通道。
 
-        简单规则：
-        - session_id 以 qq_group_ 开头 → qq_group
-        - session_id 以 qq_private_ 开头或纯数字 → qq_private
-        - session_id 以 linyu_ 开头 → linyu_private
-        - 其他 → web
+        优先从已注册的 channel 映射中查找，否则按规则推断。
         """
         sid = session_id or user_id
+
+        # 优先从注册映射中查找
+        if sid in self._session_channel_map:
+            return self._session_channel_map[sid]
+        if user_id in self._session_channel_map:
+            return self._session_channel_map[user_id]
+
+        # 按规则推断
         if sid.startswith("qq_group_"):
             return "qq_group"
         elif sid.startswith("qq_private_"):
@@ -1045,6 +1051,10 @@ class Bot:
         elif sid.isdigit():
             return "qq_private"
         return "web"
+
+    def register_session_channel(self, session_id: str, channel: str) -> None:
+        """注册 session/user 到 channel 的映射（由 adapter 调用）"""
+        self._session_channel_map[session_id] = channel
 
     def clear_history(self, session_id: str = "default", user_id: str = "default"):
         """清空指定会话的对话历史"""

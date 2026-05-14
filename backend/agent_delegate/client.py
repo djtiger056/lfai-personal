@@ -1,8 +1,7 @@
-"""Hermes Agent HTTP 客户端 — 封装 Runs API"""
+"""Hermes Agent HTTP 客户端 — Chat Completions API"""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -13,10 +12,8 @@ from .config import HermesConfig
 
 
 class RunStatus(Enum):
-    """Hermes Run 状态"""
+    """任务状态"""
 
-    STARTED = "started"
-    RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -25,7 +22,7 @@ class RunStatus(Enum):
 
 @dataclass
 class RunResult:
-    """一次 Run 的结果"""
+    """一次任务的结果"""
 
     run_id: str
     status: RunStatus
@@ -34,7 +31,11 @@ class RunResult:
 
 
 class HermesClient:
-    """Hermes Agent Runs API 客户端"""
+    """Hermes Agent Chat Completions 客户端
+
+    使用 /v1/chat/completions 接口（OpenAI 兼容），
+    一次请求等待 Hermes 执行完毕后返回结果，无需轮询。
+    """
 
     def __init__(self, config: HermesConfig):
         self._config = config
@@ -62,137 +63,81 @@ class HermesClient:
         except Exception:
             return False
 
-    async def submit_run(self, task: str, instructions: Optional[str] = None) -> Optional[str]:
-        """提交一个任务到 Hermes，返回 run_id。
+    async def execute_task(self, task: str, instructions: Optional[str] = None) -> RunResult:
+        """执行一个任务并等待结果。
+
+        使用 Chat Completions API，Hermes 会执行任务（调用工具等），
+        完成后返回最终结果。
 
         Args:
             task: 任务描述
             instructions: 可选的 system instructions
 
         Returns:
-            run_id 字符串，失败返回 None
+            RunResult 包含状态和输出
         """
-        payload = {
-            "input": task,
-        }
+        messages = []
         if instructions:
-            payload["instructions"] = instructions
+            messages.append({"role": "system", "content": instructions})
+        messages.append({"role": "user", "content": task})
+
+        payload = {
+            "model": "hermes-agent",
+            "messages": messages,
+            "stream": False,
+        }
 
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
+            # 使用配置的 timeout（默认 300 秒），Hermes 执行任务可能需要较长时间
+            timeout = aiohttp.ClientTimeout(total=self._config.timeout)
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                print(f"[HermesClient] 发送任务到 {self._base_url}/v1/chat/completions ...")
                 async with session.post(
-                    f"{self._base_url}/v1/runs",
+                    f"{self._base_url}/v1/chat/completions",
                     headers=self._headers(),
                     json=payload,
                 ) as resp:
-                    if resp.status in (200, 201):
-                        data = await resp.json()
-                        return data.get("run_id")
-                    else:
-                        error_text = await resp.text()
-                        print(f"[AgentDelegate] 提交任务失败: {resp.status} - {error_text}")
-                        return None
-        except Exception as e:
-            print(f"[AgentDelegate] 提交任务异常: {e}")
-            return None
-
-    async def poll_run(self, run_id: str) -> RunResult:
-        """查询 run 的当前状态。
-
-        Args:
-            run_id: 任务 ID
-
-        Returns:
-            RunResult 包含状态和输出
-        """
-        try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    f"{self._base_url}/v1/runs/{run_id}",
-                    headers=self._headers(),
-                ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        status_str = data.get("status", "unknown")
-                        try:
-                            status = RunStatus(status_str)
-                        except ValueError:
-                            status = RunStatus.UNKNOWN
-
-                        output = data.get("output")
-                        error = data.get("error")
-
-                        return RunResult(
-                            run_id=run_id,
-                            status=status,
-                            output=output,
-                            error=error,
-                        )
+                        # 提取 assistant 回复内容
+                        choices = data.get("choices", [])
+                        if choices:
+                            content = choices[0].get("message", {}).get("content", "")
+                            return RunResult(
+                                run_id=data.get("id", "unknown"),
+                                status=RunStatus.COMPLETED,
+                                output=content,
+                            )
+                        else:
+                            return RunResult(
+                                run_id=data.get("id", "unknown"),
+                                status=RunStatus.FAILED,
+                                error="Hermes 返回了空结果",
+                            )
                     else:
                         error_text = await resp.text()
+                        print(f"[HermesClient] 请求失败: {resp.status} - {error_text[:300]}")
                         return RunResult(
-                            run_id=run_id,
-                            status=RunStatus.UNKNOWN,
-                            error=f"查询失败: {resp.status} - {error_text}",
+                            run_id="unknown",
+                            status=RunStatus.FAILED,
+                            error=f"请求失败 ({resp.status}): {error_text[:200]}",
                         )
-        except Exception as e:
+        except aiohttp.ServerTimeoutError:
             return RunResult(
-                run_id=run_id,
-                status=RunStatus.UNKNOWN,
-                error=f"查询异常: {e}",
+                run_id="unknown",
+                status=RunStatus.FAILED,
+                error=f"任务超时（{self._config.timeout}秒），Hermes 未在规定时间内完成",
             )
-
-    async def stop_run(self, run_id: str) -> bool:
-        """取消一个正在执行的任务。
-
-        Args:
-            run_id: 任务 ID
-
-        Returns:
-            是否成功发送停止请求
-        """
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{self._base_url}/v1/runs/{run_id}/stop",
-                    headers=self._headers(),
-                ) as resp:
-                    return resp.status in (200, 202)
+        except aiohttp.ClientError as e:
+            return RunResult(
+                run_id="unknown",
+                status=RunStatus.FAILED,
+                error=f"网络错误: {e}",
+            )
         except Exception as e:
-            print(f"[AgentDelegate] 停止任务异常: {e}")
-            return False
-
-    async def wait_for_completion(self, run_id: str) -> RunResult:
-        """轮询等待任务完成。
-
-        会按照配置的 poll_interval 间隔轮询，直到任务完成或超时。
-
-        Args:
-            run_id: 任务 ID
-
-        Returns:
-            最终的 RunResult
-        """
-        elapsed = 0.0
-        poll_interval = self._config.poll_interval
-        timeout = self._config.timeout
-
-        while elapsed < timeout:
-            result = await self.poll_run(run_id)
-
-            if result.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
-                return result
-
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-
-        # 超时，尝试停止任务
-        await self.stop_run(run_id)
-        return RunResult(
-            run_id=run_id,
-            status=RunStatus.FAILED,
-            error=f"任务超时（{timeout}秒），已自动取消",
-        )
+            print(f"[HermesClient] 执行任务异常: {e}")
+            return RunResult(
+                run_id="unknown",
+                status=RunStatus.FAILED,
+                error=f"执行异常: {e}",
+            )

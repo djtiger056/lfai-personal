@@ -277,19 +277,28 @@ async def start_adapters():
 
         # 启动 Agent 委派器
         if bot.agent_delegator and bot.agent_delegator.enabled:
-            # 将 proactive_scheduler 的 sender 复用为推送回调
-            if proactive_scheduler:
-                async def _delegate_push(target: dict, payload):
-                    """Agent 委派结果推送回调 — 复用已注册的 sender"""
-                    channel = target.get("channel", "web")
-                    sender = proactive_scheduler.senders.get(channel)
-                    if sender:
-                        await sender(target, payload)
-                    else:
-                        # 降级到 web 队列
-                        await proactive_scheduler.enqueue_web_message(target, payload)
+            # 委派结果推送回调 — 直接发送完整文本，不分段
+            async def _delegate_push(target: dict, payload):
+                """Agent 委派结果推送回调 — 完整发送，不分段"""
+                channel = target.get("channel", "web")
+                user = target.get("user_id")
+                text = str(payload) if not isinstance(payload, dict) else (payload.get("text") or "")
 
-                bot.agent_delegator.set_push_callback(_delegate_push)
+                if not user or not text:
+                    return
+
+                if channel == "linyu_private" and linyu_adapter:
+                    await linyu_adapter._send_text_once(user, text, is_group=False)
+                elif channel == "qq_private" and qq_adapter:
+                    await qq_adapter.send_private_message(user, text)
+                elif channel == "qq_group" and qq_adapter:
+                    group = target.get("session_id", user)
+                    await qq_adapter.send_group_message(group, text)
+                elif proactive_scheduler:
+                    # 降级到 web 队列
+                    await proactive_scheduler.enqueue_web_message(target, payload)
+
+            bot.agent_delegator.set_push_callback(_delegate_push)
 
             await bot.agent_delegator.start()
             print("🚀 Agent 委派器已启动")
