@@ -43,6 +43,7 @@ from backend.api.user_config import router as user_config_router
 from backend.api.admin_users import router as admin_users_router
 from backend.api.voice_session import router as voice_session_router
 from backend.api.daily_schedule import router as daily_schedule_router
+from backend.api.prompt import router as prompt_router
 from backend.user import user_manager
 
 # 创建 FastAPI 应用
@@ -91,6 +92,7 @@ app.include_router(user_config_router)
 app.include_router(admin_users_router)
 app.include_router(voice_session_router)
 app.include_router(daily_schedule_router)
+app.include_router(prompt_router)
 
 
 @app.get("/api/health")

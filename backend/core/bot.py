@@ -1042,7 +1042,9 @@ class Bot:
         except Exception as e:
             print(f"[DEBUG] 提示词增强失败，使用原始提示词: {e}")
 
-        image = await image_mgr.generate_image(enhanced_prompt)
+        # 底图按 username 存储，需要将数字 user_id 解析为 username
+        effective_user_id = self._user_cache._resolve_username(user_id) or user_id
+        image = await image_mgr.generate_image(enhanced_prompt, user_id=effective_user_id)
         if image:
             await self._record_image_generation(user_id, session_id, enhanced_prompt)
         return image

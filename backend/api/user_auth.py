@@ -1,6 +1,7 @@
 """用户认证 API 接口"""
+import re
 from fastapi import APIRouter, HTTPException, Depends, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
 from backend.user import user_manager, auth_manager, User
@@ -9,14 +10,24 @@ from backend.api.deps import get_access_token
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
+# 用户名只允许英文字母和数字
+_USERNAME_RE = re.compile(r'^[A-Za-z0-9]+$')
+
 
 class RegisterRequest(BaseModel):
     """注册请求模型"""
-    username: str = Field(description="用户名", min_length=3, max_length=50)
+    username: str = Field(description="用户名（只允许英文字母和数字）", min_length=3, max_length=50)
     password: str = Field(description="密码", min_length=6, max_length=100)
     nickname: Optional[str] = Field(default=None, description="昵称")
     qq_user_id: Optional[str] = Field(default=None, description="QQ用户ID")
     avatar: Optional[str] = Field(default=None, description="头像URL")
+
+    @field_validator('username')
+    @classmethod
+    def username_alphanumeric(cls, v: str) -> str:
+        if not _USERNAME_RE.match(v):
+            raise ValueError('用户名只允许英文字母和数字')
+        return v
 
 
 class LoginRequest(BaseModel):

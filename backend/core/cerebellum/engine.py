@@ -520,6 +520,8 @@ class CerebellumEngine:
         return f"{channel}:{user_id}:{session_id or user_id}"
 
     def _safe_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        if value is None:
+            return max(minimum, min(maximum, default))
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -528,6 +530,8 @@ class CerebellumEngine:
         return max(minimum, min(maximum, parsed))
 
     def _safe_float(self, value: Any, default: float, minimum: float, maximum: float) -> float:
+        if value is None:
+            return max(minimum, min(maximum, default))
         try:
             parsed = float(value)
         except (TypeError, ValueError):

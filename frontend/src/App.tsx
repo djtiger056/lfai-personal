@@ -12,9 +12,9 @@ import {
   EyeOutlined,
   BellOutlined,
   HighlightOutlined,
-  CalendarOutlined,
   SmileOutlined,
   ClockCircleOutlined,
+  ScheduleOutlined,
   ToolOutlined,
   LogoutOutlined,
   CrownOutlined,
@@ -31,7 +31,6 @@ import MemoryPage from './pages/MemoryPage'
 import VisionPage from './pages/VisionPage'
 import { useNavigate, useLocation } from 'react-router-dom'
 import PromptEnhancerPage from './pages/PromptEnhancerPage'
-import DailyHabitsPage from './pages/DailyHabitsPage'
 import DailySchedulePage from './pages/DailySchedulePage'
 import EmotePage from './pages/EmotePage'
 import ReminderPage from './pages/ReminderPage'
@@ -88,13 +87,8 @@ const MainLayout: React.FC = () => {
       label: '表情包管理',
     },
     {
-      key: '/daily-habits',
-      icon: <CalendarOutlined />,
-      label: '每日习惯',
-    },
-    {
       key: '/daily-schedule',
-      icon: <ClockCircleOutlined />,
+      icon: <ScheduleOutlined />,
       label: '作息生成',
     },
     {
@@ -237,7 +231,6 @@ const MainLayout: React.FC = () => {
             <Route path="/image-gen" element={<ImageGenPage />} />
             <Route path="/prompt-enhancer" element={<PromptEnhancerPage />} />
             <Route path="/emotes" element={<EmotePage />} />
-            <Route path="/daily-habits" element={<DailyHabitsPage />} />
             <Route path="/daily-schedule" element={<DailySchedulePage />} />
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/vision" element={<VisionPage />} />

@@ -6,8 +6,6 @@ import {
   VoiceCharacter,
   PromptEnhancerConfig,
   PromptEnhancePreview,
-  DailyHabitsConfig,
-  DailyHabitsStatus,
   EmoteConfig,
   EmoteConfigResponse,
   EmoteCategoryInfo,
@@ -300,7 +298,7 @@ export const imageGenApi = {
     try {
       const response = await api.post('/image-gen/generate', {
         prompt
-      })
+      }, { timeout: 150000 })
       return response.data
     } catch (error: any) {
       console.error('图像生成错误:', error)
@@ -311,12 +309,39 @@ export const imageGenApi = {
   // 测试图像生成连接
   testImageGenConnection: async (): Promise<boolean> => {
     try {
-      const response = await api.post('/image-gen/test-connection')
+      const response = await api.post('/image-gen/test-connection', {}, { timeout: 30000 })
       return response.data.success
     } catch (error: any) {
       console.error('图像生成连接测试错误:', error)
       return false
     }
+  },
+
+  // 上传底图
+  uploadBaseImage: async (file: File): Promise<{ success: boolean; message: string; filename?: string; file_size?: number; mime_type?: string }> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post('/image-gen/base-image/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return response.data
+  },
+
+  // 获取底图
+  getBaseImage: async (): Promise<{ success: boolean; message: string; image_data?: string; filename?: string; file_size?: number; mime_type?: string; last_modified?: string } | null> => {
+    try {
+      const response = await api.get('/image-gen/base-image')
+      return response.data
+    } catch (error: any) {
+      if (error.response?.status === 404) return null
+      throw error
+    }
+  },
+
+  // 删除底图
+  deleteBaseImage: async (): Promise<{ success: boolean; message: string }> => {
+    const response = await api.delete('/image-gen/base-image')
+    return response.data
   },
 }
 
@@ -543,7 +568,7 @@ export const memoryApi = {
   },
 
   // 获取用户ID列表
-  getMemoryUsers: async (): Promise<{ user_ids: string[] }> => {
+  getMemoryUsers: async (): Promise<{ user_ids: string[]; user_info?: { user_id: string; display_name: string }[] }> => {
     try {
       const response = await api.get('/memory/users')
       return response.data
@@ -689,20 +714,6 @@ export const emoteApi = {
     const response = await api.post('/emotes/reload')
     return response.data
   }
-}
-
-export const dailyHabitsApi = {
-  getConfig: async (): Promise<DailyHabitsConfig> => {
-    const response = await api.get('/mcp/daily-habits/config')
-    return response.data.config
-  },
-  saveConfig: async (config: DailyHabitsConfig): Promise<void> => {
-    await api.post('/mcp/daily-habits/config', config)
-  },
-  getStatus: async (): Promise<DailyHabitsStatus> => {
-    const response = await api.get('/mcp/daily-habits/status')
-    return response.data
-  },
 }
 
 export const dailyScheduleApi = {
@@ -877,6 +888,14 @@ export const authApi = {
       old_password: oldPassword,
       new_password: newPassword,
     })
+  },
+
+  // 绑定 QQ 号
+  bindQQ: async (qqUserId: string): Promise<{ message: string }> => {
+    const response = await api.post('/auth/qq-bind', null, {
+      params: { qq_user_id: qqUserId },
+    })
+    return response.data
   },
 }
 

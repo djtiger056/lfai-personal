@@ -122,11 +122,42 @@ async def update_memory_config(request: UpdateMemoryConfigRequest):
 
 @router.get("/memory/users")
 async def get_memory_users():
-    """获取所有有记忆的用户ID列表"""
+    """获取所有有记忆的用户ID列表，附带用户名/昵称信息"""
     try:
         manager = await ensure_memory_manager_initialized()
         user_ids = await manager.get_all_user_ids()
-        return {"user_ids": user_ids}
+
+        # 尝试从用户管理器获取用户名映射
+        user_info_list = []
+        try:
+            from backend.user import user_manager
+            for uid in user_ids:
+                info = {"user_id": uid, "display_name": uid}
+                # 尝试按 qq_user_id 查找
+                user = await user_manager.get_user_by_qq_id(uid)
+                if not user and uid.isdigit():
+                    user = await user_manager.get_user_by_id(int(uid))
+                if not user:
+                    # 尝试按 username 查找
+                    user = await user_manager.get_user_by_username(uid)
+                if user:
+                    nickname = getattr(user, 'nickname', None) or getattr(user, 'username', None)
+                    username = getattr(user, 'username', None)
+                    qq_id = getattr(user, 'qq_user_id', None)
+                    parts = []
+                    if nickname:
+                        parts.append(nickname)
+                    if qq_id and qq_id != uid:
+                        parts.append(f"QQ:{qq_id}")
+                    elif username and username != nickname and username != uid:
+                        parts.append(f"@{username}")
+                    info["display_name"] = " ".join(parts) if parts else uid
+                user_info_list.append(info)
+        except Exception:
+            # 如果用户管理器不可用，回退到纯 ID 列表
+            user_info_list = [{"user_id": uid, "display_name": uid} for uid in user_ids]
+
+        return {"user_ids": user_ids, "user_info": user_info_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取用户ID列表失败: {str(e)}")
 

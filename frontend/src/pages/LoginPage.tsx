@@ -201,12 +201,12 @@ const LoginPage: React.FC = () => {
                       { required: true, message: '请输入用户名' },
                       { min: 3, message: '用户名至少3个字符' },
                       { max: 50, message: '用户名最多50个字符' },
-                      { pattern: /^[a-zA-Z0-9_\u4e00-\u9fa5]+$/, message: '用户名只能包含字母、数字、下划线和中文' }
+                      { pattern: /^[A-Za-z0-9]+$/, message: '用户名只能包含英文字母和数字' }
                     ]}
                   >
                     <Input
                       prefix={<UserOutlined style={{ color: '#bfbfbf' }} />}
-                      placeholder="用户名"
+                      placeholder="用户名（英文字母和数字）"
                       style={{ borderRadius: '8px' }}
                     />
                   </Form.Item>

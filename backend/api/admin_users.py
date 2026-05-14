@@ -187,9 +187,9 @@ async def delete_user(user_key: str):
     """删除用户"""
     user = await _resolve_user(user_key)
     
-    # 同时删除用户数据文件
+    # 同时删除用户数据文件（按 username 命名的目录）
     from backend.user import user_data_manager
-    user_data_manager.delete_user_data(user.id)
+    user_data_manager.delete_user_data(user.username)
     
     success = await user_manager.delete_user(user.id)
     if not success:
@@ -249,7 +249,7 @@ async def get_user_storage_stats(user_key: str):
     user = await _resolve_user(user_key)
     
     from backend.user import user_data_manager
-    stats = user_data_manager.get_user_storage_stats(user.id)
+    stats = user_data_manager.get_user_storage_stats(user.username)
     
     return {
         "user_id": user.id,
