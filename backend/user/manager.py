@@ -30,6 +30,27 @@ class UserManager:
         """初始化数据库表"""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # 自动迁移：为已有数据库添加新列
+            await conn.run_sync(self._migrate_columns)
+
+    @staticmethod
+    def _migrate_columns(connection):
+        """检查并添加缺失的列（兼容已有数据库）"""
+        from sqlalchemy import inspect, text
+        inspector = inspect(connection)
+        columns = [col['name'] for col in inspector.get_columns('users')]
+        if 'linyu_user_id' not in columns:
+            # SQLite 不支持 ALTER TABLE ADD COLUMN ... UNIQUE，需分步操作
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN linyu_user_id VARCHAR(100)"
+            ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_linyu_user_id ON users (linyu_user_id)"
+            ))
+        if 'linyu_account' not in columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN linyu_account VARCHAR(100)"
+            ))
     
     def get_session(self) -> AsyncSession:
         """获取数据库会话"""
@@ -100,6 +121,65 @@ class UserManager:
             stmt = select(User).where(User.qq_user_id == qq_user_id)
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def get_user_by_linyu_id(self, linyu_user_id: str) -> Optional[User]:
+        """根据Linyu用户ID或账号名获取用户"""
+        async with self.get_session() as session:
+            stmt = select(User).where(User.linyu_user_id == linyu_user_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def get_or_create_user_by_linyu_id(
+        self,
+        linyu_user_id: str,
+        *,
+        nickname: Optional[str] = None,
+        avatar: Optional[str] = None,
+    ) -> User:
+        """按 Linyu 用户ID 获取或自动创建用户（免注册）。
+
+        用途：机器人面向 Linyu 多用户使用时，首次接触自动建档，默认继承全局配置。
+        """
+        existing = await self.get_user_by_linyu_id(linyu_user_id)
+        if existing:
+            return existing
+
+        base_username = f"linyu_{linyu_user_id}"
+        username = base_username
+
+        random_password = secrets.token_urlsafe(32)
+        password_hash = auth_manager.hash_password(random_password)
+
+        async with self.get_session() as session:
+            suffix = 0
+            while True:
+                stmt = select(User).where(User.username == username)
+                res = await session.execute(stmt)
+                if res.scalar_one_or_none() is None:
+                    break
+                suffix += 1
+                username = f"{base_username}_{suffix}"
+
+            user = User(
+                username=username,
+                password_hash=password_hash,
+                nickname=nickname or username,
+                linyu_user_id=linyu_user_id,
+                avatar=avatar,
+                is_active=1,
+                is_admin=0,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            user_config = UserConfig(user_id=user.id)
+            session.add(user_config)
+            await session.commit()
+
+            user_data_manager.init_user_data(user.username)
+
+            return user
 
     async def get_or_create_user_by_qq_id(
         self,
@@ -263,6 +343,8 @@ class UserManager:
         avatar: Optional[str] = None,
         is_active: Optional[int] = None,
         qq_user_id: Optional[str] = None,
+        linyu_user_id: Optional[str] = None,
+        linyu_account: Optional[str] = None,
     ) -> bool:
         """更新用户信息"""
         async with self.get_session() as session:
@@ -281,6 +363,10 @@ class UserManager:
                 user.is_active = is_active
             if qq_user_id is not None:
                 user.qq_user_id = qq_user_id
+            if linyu_user_id is not None:
+                user.linyu_user_id = linyu_user_id
+            if linyu_account is not None:
+                user.linyu_account = linyu_account
             
             await session.commit()
             return True

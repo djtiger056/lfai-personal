@@ -42,6 +42,8 @@ class UserResponse(BaseModel):
     username: str
     nickname: Optional[str]
     qq_user_id: Optional[str]
+    linyu_user_id: Optional[str]
+    linyu_account: Optional[str]
     avatar: Optional[str]
     is_active: int
     is_admin: int
@@ -195,6 +197,147 @@ async def bind_qq_account(token: str = Depends(get_access_token), qq_user_id: st
         )
     
     return {"message": "QQ账号绑定成功"}
+
+
+@router.post("/auth/linyu-bind")
+async def bind_linyu_account(token: str = Depends(get_access_token), linyu_user_id: str = ""):
+    """绑定Linyu账号
+    
+    接受 Linyu 用户 ID（UUID格式）或 Linyu 账号名。
+    如果传入的是账号名且 Linyu 服务可达，会自动解析为用户 ID。
+    如果 Linyu 服务不可达，直接以账号名作为标识存储。
+    """
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少令牌")
+    if not linyu_user_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少 linyu_user_id")
+    user_info = auth_manager.get_user_from_token(token)
+    
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无效的令牌"
+        )
+    
+    input_value = linyu_user_id.strip()
+    resolved_id = input_value
+    display_account = input_value  # 用于前端显示的账号名
+
+    if _looks_like_uuid(input_value):
+        # 用户直接输入了 UUID，尝试反查账号名
+        display_account = input_value[:8] + "..."
+    else:
+        # 用户输入的是账号名，尝试解析为 userId
+        display_account = input_value
+        resolved = await _resolve_linyu_user_id(input_value)
+        if resolved:
+            resolved_id = resolved
+        # 如果解析失败，直接用账号名作为 linyu_user_id 存储
+
+    # 检查Linyu用户ID是否已被绑定
+    existing_user = await user_manager.get_user_by_linyu_id(resolved_id)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该Linyu账号已被绑定"
+        )
+    
+    # 获取用户
+    user = await user_manager.get_user_by_id(user_info['user_id'])
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="用户不存在"
+        )
+    
+    # 更新用户Linyu ID和账号名
+    success = await user_manager.update_user(
+        user_id=user.id,
+        linyu_user_id=resolved_id,
+        linyu_account=display_account
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="绑定失败"
+        )
+    
+    return {"message": "Linyu账号绑定成功", "linyu_user_id": resolved_id, "linyu_account": display_account}
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """判断是否为 UUID 格式"""
+    return len(value) == 36 and value.count("-") == 4
+
+
+async def _resolve_linyu_user_id(account: str) -> Optional[str]:
+    """通过 Linyu API 将账号解析为用户 ID"""
+    import aiohttp
+    from backend.config import config as app_config
+
+    linyu_config = app_config.adapters_config.get("linyu", {})
+    http_host = linyu_config.get("http_host", "127.0.0.1")
+    http_port = linyu_config.get("http_port", 9200)
+    
+    # 构建 base URL
+    if http_host.startswith("http://") or http_host.startswith("https://"):
+        base_url = http_host.rstrip("/")
+    else:
+        base_url = f"http://{http_host}"
+    if ":" not in base_url.split("://", 1)[1]:
+        base_url = f"{base_url}:{http_port}"
+
+    # 需要先获取 token（使用 bot 的 Linyu 账号登录）
+    bot_account = linyu_config.get("account", "")
+    bot_password = linyu_config.get("password", "")
+    if not bot_account or not bot_password:
+        return None
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 获取公钥
+            async with session.get(f"{base_url}/v1/api/login/public-key") as resp:
+                pk_result = await resp.json()
+            public_key_pem = pk_result.get("data", "") if isinstance(pk_result, dict) else str(pk_result)
+
+            # 加密密码
+            from cryptography.hazmat.primitives.asymmetric import padding
+            from cryptography.hazmat.primitives.serialization import load_pem_public_key
+            import base64
+
+            password_str = str(bot_password) if bot_password else ""
+            public_key = load_pem_public_key(str(public_key_pem).encode("utf-8"))
+            encrypted = public_key.encrypt(password_str.encode("utf-8"), padding.PKCS1v15())
+            encrypted_password = base64.b64encode(encrypted).decode("utf-8")
+
+            # 登录获取 token
+            login_payload = {"account": bot_account, "password": encrypted_password, "onlineEquipment": "bot"}
+            async with session.post(f"{base_url}/v1/api/login", json=login_payload) as resp:
+                login_result = await resp.json()
+            login_data = login_result.get("data") if isinstance(login_result, dict) else None
+            if not login_data or "token" not in login_data:
+                return None
+            bot_token = login_data["token"]
+
+            # 搜索用户
+            headers = {"x-token": bot_token}
+            search_payload = {"userInfo": account}
+            async with session.post(f"{base_url}/v1/api/user/search", json=search_payload, headers=headers) as resp:
+                search_result = await resp.json()
+            data = search_result.get("data") if isinstance(search_result, dict) else None
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and str(item.get("account", "")) == account:
+                        return str(item.get("id") or item.get("userId") or "")
+                if len(data) == 1 and isinstance(data[0], dict):
+                    return str(data[0].get("id") or data[0].get("userId") or "")
+            elif isinstance(data, dict):
+                return str(data.get("id") or data.get("userId") or "")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Linyu 账号解析失败: {e}")
+    return None
 
 
 class ChangePasswordRequest(BaseModel):

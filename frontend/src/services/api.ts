@@ -828,6 +828,7 @@ export interface UserConfig {
   prompt_enhancer?: Record<string, any>
   emotes?: Record<string, any>
   proactive_chat?: Record<string, any>
+  agent_delegate?: Record<string, any>
   preferences?: Record<string, any>
 }
 
@@ -894,6 +895,14 @@ export const authApi = {
   bindQQ: async (qqUserId: string): Promise<{ message: string }> => {
     const response = await api.post('/auth/qq-bind', null, {
       params: { qq_user_id: qqUserId },
+    })
+    return response.data
+  },
+
+  // 绑定 Linyu 账号
+  bindLinyu: async (linyuUserId: string): Promise<{ message: string }> => {
+    const response = await api.post('/auth/linyu-bind', null, {
+      params: { linyu_user_id: linyuUserId },
     })
     return response.data
   },

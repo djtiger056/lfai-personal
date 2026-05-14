@@ -119,6 +119,85 @@ const QQBindSection: React.FC<{ user: any; onSuccess: () => void }> = ({ user, o
 };
 
 /**
+ * Linyu 绑定区域组件
+ */
+const LinyuBindSection: React.FC<{ user: any; onSuccess: () => void }> = ({ user, onSuccess }) => {
+  const [linyuId, setLinyuId] = useState('');
+  const [binding, setBinding] = useState(false);
+  const { refreshUser } = useAuth();
+
+  const handleBind = async () => {
+    if (!linyuId.trim()) {
+      message.warning('请输入 Linyu 账号');
+      return;
+    }
+    setBinding(true);
+    try {
+      await authApi.bindLinyu(linyuId.trim());
+      message.success('Linyu 账号绑定成功');
+      setLinyuId('');
+      await refreshUser();
+      onSuccess();
+    } catch (error: any) {
+      const detail = error.response?.data?.detail || error.message;
+      message.error('绑定失败: ' + detail);
+    } finally {
+      setBinding(false);
+    }
+  };
+
+  return (
+    <>
+      <Alert
+        message="Linyu 账号绑定"
+        description="绑定 Linyu 账号后，通过 Linyu 聊天时系统能识别你的身份，使用你的个性化配置与 AI 对话。你可以输入 Linyu 账号名或用户 ID。"
+        type="info"
+        showIcon
+        style={{ marginBottom: 24 }}
+      />
+
+      {user?.linyu_user_id ? (
+        <div style={{ marginBottom: 16 }}>
+          <Space>
+            <LinkOutlined style={{ fontSize: 20, color: '#722ed1' }} />
+            <span>当前绑定的 Linyu 账号：</span>
+            <Tag color="purple" style={{ fontSize: 14 }}>{user.linyu_account || user.linyu_user_id}</Tag>
+          </Space>
+        </div>
+      ) : (
+        <div style={{ marginBottom: 16 }}>
+          <Space>
+            <LinkOutlined style={{ fontSize: 20, color: '#999' }} />
+            <span style={{ color: '#999' }}>尚未绑定 Linyu 账号</span>
+          </Space>
+        </div>
+      )}
+
+      <Form.Item label="绑定 Linyu 账号" help="输入你的 Linyu 账号名或用户 ID，系统会自动解析。每个 Linyu 账号只能绑定一个用户">
+        <Space>
+          <Input
+            placeholder="输入 Linyu 账号名或用户 ID"
+            value={linyuId}
+            onChange={(e) => setLinyuId(e.target.value)}
+            style={{ width: 240 }}
+            prefix={<LinkOutlined />}
+            onPressEnter={handleBind}
+          />
+          <Button
+            type="primary"
+            icon={<LinkOutlined />}
+            onClick={handleBind}
+            loading={binding}
+          >
+            绑定
+          </Button>
+        </Space>
+      </Form.Item>
+    </>
+  );
+};
+
+/**
  * 用户个人设置页面
  * 用户可以在这里配置自己的个性化设置，覆盖全局默认配置
  */
@@ -567,13 +646,17 @@ const UserSettingsPage: React.FC = () => {
                 label: (
                   <span>
                     <LinkOutlined /> 账号绑定
-                    {user?.qq_user_id && (
+                    {(user?.qq_user_id || user?.linyu_user_id) && (
                       <Tag color="green" style={{ marginLeft: 8 }}>已绑定</Tag>
                     )}
                   </span>
                 ),
                 children: (
-                  <QQBindSection user={user} onSuccess={loadConfigs} />
+                  <>
+                    <QQBindSection user={user} onSuccess={loadConfigs} />
+                    <Divider />
+                    <LinyuBindSection user={user} onSuccess={loadConfigs} />
+                  </>
                 ),
               },
               // 适配器配置 Tab（仅管理员可见）

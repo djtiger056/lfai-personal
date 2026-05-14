@@ -7,6 +7,8 @@ export interface User {
   username: string;
   nickname: string | null;
   qq_user_id: string | null;
+  linyu_user_id: string | null;
+  linyu_account: string | null;
   avatar: string | null;
   is_active: number;
   is_admin: number;

@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, AsyncGenerator, Optional, Set, Tuple
 from datetime import datetime
+import asyncio
 import json
 import copy
 import logging
@@ -16,6 +17,8 @@ from ..asr import ASRManager, ASRConfig
 from ..memory import MemoryManager, MemoryConfig
 from ..mcp import MCPManager
 from ..emote import EmoteManager, EmoteConfig
+from ..agent_delegate import AgentDelegator, extract_delegate_tag
+from ..agent_delegate.config import AgentDelegateConfig
 from ..user import user_manager
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now, from_isoformat
@@ -120,6 +123,16 @@ class Bot:
 
         # 上下文构建器（消除 chat/chat_stream/generate_proactive_reply 中的重复逻辑）
         self._context_builder = ContextBuilder(self)
+
+        # 初始化 Agent 委派器
+        self.agent_delegator: Optional[AgentDelegator] = None
+        try:
+            delegate_config = config.agent_delegate_config
+            if delegate_config.enabled:
+                self.agent_delegator = AgentDelegator(delegate_config)
+                print("🤖 Agent 委派器已初始化（等待启动）")
+        except Exception as e:
+            print(f"Agent 委派器初始化失败: {str(e)}")
 
     def _get_session_history(self, session_id: str, user_id: str = "default") -> List[Dict[str, str]]:
         """获取或初始化指定会话的对话历史"""
@@ -645,6 +658,20 @@ class Bot:
                 }
                 print(f"[Bot] 图片已生成，大小: {len(image_data)} bytes")
 
+            # 处理回复中的委派标签 [DELEGATE: ...]
+            cleaned_response, delegate_task = extract_delegate_tag(cleaned_response)
+            if delegate_task and self.agent_delegator and self.agent_delegator.enabled:
+                # 异步提交任务，不阻塞回复
+                asyncio.create_task(
+                    self.agent_delegator.submit(
+                        task_description=delegate_task,
+                        user_id=user_id,
+                        session_id=session_id or user_id,
+                        channel=self._resolve_channel(user_id, session_id),
+                    )
+                )
+                print(f"[Bot] 委派任务已提交: {delegate_task[:80]}...")
+
             return cleaned_response
             
         except Exception as e:
@@ -728,6 +755,20 @@ class Bot:
             if cleaned_response != full_response:
                 full_response = cleaned_response
 
+            # 处理回复中的委派标签 [DELEGATE: ...]
+            cleaned_delegate, delegate_task = extract_delegate_tag(full_response)
+            if delegate_task and self.agent_delegator and self.agent_delegator.enabled:
+                full_response = cleaned_delegate
+                asyncio.create_task(
+                    self.agent_delegator.submit(
+                        task_description=delegate_task,
+                        user_id=user_id,
+                        session_id=session_id or user_id,
+                        channel=self._resolve_channel(user_id, session_id),
+                    )
+                )
+                print(f"[Bot Stream] 委派任务已提交: {delegate_task[:80]}...")
+
             # 添加完整回复到原始历史（不包含记忆上下文）
             history.append({
                 "role": "assistant",
@@ -745,7 +786,7 @@ class Bot:
             print(
                 f"[Latency][bot.chat_stream] user_id={user_id} session_id={session_id} "
                 f"stages_ms={json.dumps(stage_marks, ensure_ascii=False)} "
-                f"metrics={json.dumps({'relevant_memories': len(relevant_memories), 'mcp_blocks': len(mcp_blocks), 'history_messages': len(history)}, ensure_ascii=False)}"
+                f"metrics={json.dumps({'relevant_memories': len(relevant_memories), 'history_messages': len(history)}, ensure_ascii=False)}"
             )
 
         except Exception as e:
@@ -985,6 +1026,26 @@ class Bot:
 
         return ""
     
+    def _resolve_channel(self, user_id: str, session_id: Optional[str] = None) -> str:
+        """根据 session_id 推断推送通道。
+
+        简单规则：
+        - session_id 以 qq_group_ 开头 → qq_group
+        - session_id 以 qq_private_ 开头或纯数字 → qq_private
+        - session_id 以 linyu_ 开头 → linyu_private
+        - 其他 → web
+        """
+        sid = session_id or user_id
+        if sid.startswith("qq_group_"):
+            return "qq_group"
+        elif sid.startswith("qq_private_"):
+            return "qq_private"
+        elif sid.startswith("linyu_"):
+            return "linyu_private"
+        elif sid.isdigit():
+            return "qq_private"
+        return "web"
+
     def clear_history(self, session_id: str = "default", user_id: str = "default"):
         """清空指定会话的对话历史"""
         system_prompt = self._get_user_system_prompt(user_id)

@@ -319,6 +319,9 @@ class LinyuAdapter:
         if self.user_id and user_id == str(self.user_id):
             return
 
+        # 尝试将 Linyu userId 与已绑定账号名的用户关联
+        await self._try_resolve_linyu_binding(user_id)
+
         # 获取消息ID用于去重
         msg_id = str(message.get("id") or message.get("msgId") or message.get("msg_id") or "")
         if msg_id and self._is_message_processed(msg_id):
@@ -1676,6 +1679,65 @@ class LinyuAdapter:
         if not value:
             return False
         return bool(len(value) == 36 and value.count("-") == 4)
+
+    async def _try_resolve_linyu_binding(self, linyu_user_id: str):
+        """如果数据库中有用户绑定了账号名（非UUID），尝试通过 Linyu API 查询该 userId 对应的 account，
+        然后将数据库中按账号名绑定的记录更新为真实的 userId。
+        
+        这样用户绑定时输入账号名即可，首次收到消息时自动修正为 UUID。
+        只在首次需要时执行，之后直接命中缓存。
+        """
+        from ..user import user_manager
+
+        # 如果已经能按 userId 找到用户，无需解析
+        existing = await user_manager.get_user_by_linyu_id(linyu_user_id)
+        if existing:
+            return
+
+        # userId 是 UUID 格式，尝试查询对应的账号名
+        if not self._looks_like_uuid(linyu_user_id):
+            return
+
+        try:
+            account = await self._get_account_by_user_id(linyu_user_id)
+            if not account:
+                return
+
+            # 查找是否有用户绑定了这个账号名
+            user_by_account = await user_manager.get_user_by_linyu_id(account)
+            if user_by_account:
+                # 将账号名更新为真实的 userId，同时保留账号名用于显示
+                await user_manager.update_user(
+                    user_id=user_by_account.id,
+                    linyu_user_id=linyu_user_id,
+                    linyu_account=account
+                )
+                print(f"✅ 自动更新 Linyu 绑定: {account} -> {linyu_user_id}")
+        except Exception as e:
+            # 解析失败不影响正常消息处理
+            pass
+
+    async def _get_account_by_user_id(self, target_user_id: str) -> Optional[str]:
+        """通过 Linyu API 查询用户 ID 对应的账号名"""
+        try:
+            result = await self._request_json(
+                "POST", "/v1/api/user/search",
+                json_data={"userInfo": target_user_id}
+            )
+            data = result.get("data") if isinstance(result, dict) else None
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        uid = str(item.get("id") or item.get("userId") or "")
+                        if uid == target_user_id:
+                            return str(item.get("account", ""))
+                if len(data) == 1 and isinstance(data[0], dict):
+                    return str(data[0].get("account", ""))
+            elif isinstance(data, dict):
+                return str(data.get("account", ""))
+        except Exception:
+            pass
+        return None
 
     def _check_user_access(self, user_id: str) -> tuple[bool, str]:
         if not self.access_control_enabled:

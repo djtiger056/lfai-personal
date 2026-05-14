@@ -89,12 +89,19 @@ class UserResourceCache:
                 # 尝试按 QQ ID 查
                 user = await user_manager.get_user_by_qq_id(str(user_id))
 
+            if user is None:
+                # 尝试按 Linyu ID 查
+                user = await user_manager.get_user_by_linyu_id(str(user_id))
+
             if user is None and not str(user_id).isdigit():
-                # 纯 QQ 号首次接触，自动建档
-                try:
-                    user = await user_manager.get_or_create_user_by_qq_id(str(user_id))
-                except Exception as e:
-                    logger.warning(f"自动创建 QQ 用户失败 user_id={user_id}: {e}")
+                # 非纯数字且非 UUID 格式，可能是 QQ 号首次接触，自动建档
+                # UUID 格式的 ID（如 Linyu fromId）不应走此路径
+                is_uuid = len(str(user_id)) == 36 and str(user_id).count("-") == 4
+                if not is_uuid:
+                    try:
+                        user = await user_manager.get_or_create_user_by_qq_id(str(user_id))
+                    except Exception as e:
+                        logger.warning(f"自动创建 QQ 用户失败 user_id={user_id}: {e}")
 
             if user:
                 user_config = await user_manager.get_user_config_dict(user.id)
