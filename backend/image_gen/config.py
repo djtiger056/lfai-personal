@@ -1,5 +1,5 @@
 from typing import Dict, Any, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ModelScopeConfig(BaseModel):
@@ -30,6 +30,25 @@ class KlingApiConfig(BaseModel):
     response_format: str = "url"
 
 
+class ImageApiConfig(BaseModel):
+    """Image API 统一图片生成服务配置（支持 Jimeng/Doubao/XYQ/Kling）"""
+    api_base: str = "http://127.0.0.1:18081"
+    api_key: str = ""
+    model: str = "doubao-seedream-4.5"
+    timeout: int = 120
+    ratio: str = "1:1"
+    resolution: str = "2k"
+    sample_strength: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class GptImageConfig(BaseModel):
+    """GPT-Image 中转站配置（仅支持图生图）"""
+    api_base: str = ""
+    api_key: str = ""
+    model: str = "gpt-image-2"
+    timeout: int = 180
+
+
 class ImageGenerationConfig(BaseModel):
     """图像生成配置"""
     enabled: bool = False
@@ -39,6 +58,9 @@ class ImageGenerationConfig(BaseModel):
     modelscope: ModelScopeConfig = ModelScopeConfig()
     yunwu: YunwuConfig = YunwuConfig()
     kling_api: KlingApiConfig = KlingApiConfig()
+    image_api: ImageApiConfig = ImageApiConfig()
+    gpt_image: GptImageConfig = GptImageConfig()
+    default_base_image_path: str = "backend/data/default_base_image.jpg"
     trigger_keywords: List[str] = [
         "画", "生成图片", "生图", "绘制"
     ]

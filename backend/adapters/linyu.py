@@ -319,6 +319,9 @@ class LinyuAdapter:
         if self.user_id and user_id == str(self.user_id):
             return
 
+        # 尝试将 Linyu userId 与已绑定账号名的用户关联
+        await self._try_resolve_linyu_binding(user_id)
+
         # 获取消息ID用于去重
         msg_id = str(message.get("id") or message.get("msgId") or message.get("msg_id") or "")
         if msg_id and self._is_message_processed(msg_id):
@@ -716,33 +719,59 @@ class LinyuAdapter:
             return text[:last_bracket], text[last_bracket:]
         return text, ""
 
+    def _split_incomplete_tag_prefix(self, text: str, tokens: list[str]) -> tuple[str, str]:
+        """将可能是任意过滤标签前缀的尾巴拆分出来，等待后续 chunk 补全。"""
+        if not text:
+            return "", ""
+
+        last_bracket = text.rfind("[")
+        if last_bracket < 0:
+            return text, ""
+
+        suffix = text[last_bracket:].lower()
+        for token in tokens:
+            if token.startswith(suffix):
+                return text[:last_bracket], text[last_bracket:]
+        return text, ""
+
     def _extract_safe_stream_text(self, pending: str) -> tuple[str, str]:
-        """从待处理文本中剥离完整/半截 [GEN_IMG: ...] 标签，返回(可显示文本, 余留缓冲)。"""
+        """从待处理文本中剥离完整/半截 [GEN_IMG: ...] 和 [DELEGATE: ...] 标签，返回(可显示文本, 余留缓冲)。"""
         if not pending:
             return "", ""
 
         lower = pending.lower()
-        token = "[gen_img:"
+        # 需要过滤的标签前缀列表
+        filter_tokens = ["[gen_img:", "[delegate:"]
         cursor = 0
         visible_parts: list[str] = []
 
         while True:
-            start = lower.find(token, cursor)
-            if start < 0:
+            # 找到最近的一个标签起始位置
+            earliest_start = -1
+            for token in filter_tokens:
+                start = lower.find(token, cursor)
+                if start >= 0 and (earliest_start < 0 or start < earliest_start):
+                    earliest_start = start
+
+            if earliest_start < 0:
                 tail = pending[cursor:]
-                visible_tail, remainder = self._split_incomplete_gen_img_prefix(tail)
+                visible_tail, remainder = self._split_incomplete_tag_prefix(tail, filter_tokens)
                 visible_parts.append(visible_tail)
                 return "".join(visible_parts), remainder
 
-            visible_parts.append(pending[cursor:start])
-            end = pending.find("]", start)
+            visible_parts.append(pending[cursor:earliest_start])
+            end = pending.find("]", earliest_start)
             if end < 0:
-                return "".join(visible_parts), pending[start:]
+                return "".join(visible_parts), pending[earliest_start:]
 
             cursor = end + 1
 
     async def _stream_reply_by_sentence(self, user_id: str, prompt: str, session_id: Optional[str] = None) -> str:
         """按句流式发送回复，句末标点含 。！？!?。"""
+        # 注册 session -> channel 映射，确保委派结果能推送回来
+        effective_session = session_id or user_id
+        self.bot.register_session_channel(effective_session, "linyu_private")
+
         final_response = ""
         sentence_buffer = ""
         stream_pending = ""
@@ -1676,6 +1705,65 @@ class LinyuAdapter:
         if not value:
             return False
         return bool(len(value) == 36 and value.count("-") == 4)
+
+    async def _try_resolve_linyu_binding(self, linyu_user_id: str):
+        """如果数据库中有用户绑定了账号名（非UUID），尝试通过 Linyu API 查询该 userId 对应的 account，
+        然后将数据库中按账号名绑定的记录更新为真实的 userId。
+        
+        这样用户绑定时输入账号名即可，首次收到消息时自动修正为 UUID。
+        只在首次需要时执行，之后直接命中缓存。
+        """
+        from ..user import user_manager
+
+        # 如果已经能按 userId 找到用户，无需解析
+        existing = await user_manager.get_user_by_linyu_id(linyu_user_id)
+        if existing:
+            return
+
+        # userId 是 UUID 格式，尝试查询对应的账号名
+        if not self._looks_like_uuid(linyu_user_id):
+            return
+
+        try:
+            account = await self._get_account_by_user_id(linyu_user_id)
+            if not account:
+                return
+
+            # 查找是否有用户绑定了这个账号名
+            user_by_account = await user_manager.get_user_by_linyu_id(account)
+            if user_by_account:
+                # 将账号名更新为真实的 userId，同时保留账号名用于显示
+                await user_manager.update_user(
+                    user_id=user_by_account.id,
+                    linyu_user_id=linyu_user_id,
+                    linyu_account=account
+                )
+                print(f"✅ 自动更新 Linyu 绑定: {account} -> {linyu_user_id}")
+        except Exception as e:
+            # 解析失败不影响正常消息处理
+            pass
+
+    async def _get_account_by_user_id(self, target_user_id: str) -> Optional[str]:
+        """通过 Linyu API 查询用户 ID 对应的账号名"""
+        try:
+            result = await self._request_json(
+                "POST", "/v1/api/user/search",
+                json_data={"userInfo": target_user_id}
+            )
+            data = result.get("data") if isinstance(result, dict) else None
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        uid = str(item.get("id") or item.get("userId") or "")
+                        if uid == target_user_id:
+                            return str(item.get("account", ""))
+                if len(data) == 1 and isinstance(data[0], dict):
+                    return str(data[0].get("account", ""))
+            elif isinstance(data, dict):
+                return str(data.get("account", ""))
+        except Exception:
+            pass
+        return None
 
     def _check_user_access(self, user_id: str) -> tuple[bool, str]:
         if not self.access_control_enabled:

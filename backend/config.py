@@ -131,6 +131,13 @@ class Config:
         return MemoryConfig(**memory_dict)
 
     @property
+    def agent_delegate_config(self):
+        """获取 Agent 委派配置"""
+        from backend.agent_delegate.config import AgentDelegateConfig
+        delegate_dict = self._config.get('agent_delegate', {})
+        return AgentDelegateConfig.from_dict(delegate_dict)
+
+    @property
     def clock_config(self) -> Dict[str, Any]:
         """获取时钟插件相关配置"""
         return self._config.get('clock', {})

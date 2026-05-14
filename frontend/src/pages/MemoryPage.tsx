@@ -166,6 +166,7 @@ const MemoryPage: React.FC = () => {
   const [searchResults, setSearchResults] = useState<MemoryItem[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [userIds, setUserIds] = useState<string[]>([])
+  const [userInfoMap, setUserInfoMap] = useState<Record<string, string>>({})
   const [selectedUserId, setSelectedUserId] = useState<string>('')
   const [externalProfiles, setExternalProfiles] = useState<any[]>([])
   const [externalEvents, setExternalEvents] = useState<any[]>([])
@@ -210,6 +211,14 @@ const MemoryPage: React.FC = () => {
       try {
         const data = await memoryApi.getMemoryUsers()
         setUserIds(data.user_ids || [])
+        // 构建 user_id -> display_name 映射
+        if (data.user_info && Array.isArray(data.user_info)) {
+          const map: Record<string, string> = {}
+          for (const info of data.user_info) {
+            map[info.user_id] = info.display_name || info.user_id
+          }
+          setUserInfoMap(map)
+        }
         if (data.user_ids && data.user_ids.length > 0) {
           setSelectedUserId(data.user_ids[0])
         }
@@ -980,11 +989,15 @@ const MemoryPage: React.FC = () => {
         <Space>
           <span>选择用户ID:</span>
           <Select
-            style={{ width: 200 }}
+            style={{ width: 280 }}
             value={selectedUserId}
             onChange={setSelectedUserId}
-            options={userIds.map(id => ({ label: id, value: id }))}
-            placeholder="选择用户ID"
+            options={userIds.map(id => ({ label: `${userInfoMap[id] || id} (${id})`, value: id }))}
+            placeholder="选择用户"
+            showSearch
+            filterOption={(input, option) =>
+              (option?.label as string || '').toLowerCase().includes(input.toLowerCase())
+            }
           />
           <Button 
             icon={<ReloadOutlined />} 
@@ -994,6 +1007,13 @@ const MemoryPage: React.FC = () => {
                 try {
                   const data = await memoryApi.getMemoryUsers()
                   setUserIds(data.user_ids || [])
+                  if (data.user_info && Array.isArray(data.user_info)) {
+                    const map: Record<string, string> = {}
+                    for (const info of data.user_info) {
+                      map[info.user_id] = info.display_name || info.user_id
+                    }
+                    setUserInfoMap(map)
+                  }
                   if (data.user_ids && data.user_ids.length > 0) {
                     setSelectedUserId(data.user_ids[0])
                   }

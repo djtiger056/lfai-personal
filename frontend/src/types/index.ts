@@ -195,46 +195,6 @@ export interface PromptEnhancePreview {
   is_enhanced: boolean
 }
 
-export interface DailyHabitSlot {
-  start: string
-  end: string
-  activity: string
-  desc?: string
-}
-
-export interface DailyHabitsOverride {
-  enabled: boolean
-  activity?: string
-  desc?: string
-  expires_at?: string | null
-}
-
-export interface DailyHabitsConfig {
-  enabled: boolean
-  timezone?: string | null
-  default_schedule: string
-  weekend_schedule?: string | null
-  override?: DailyHabitsOverride
-  schedules: Record<string, DailyHabitSlot[]>
-}
-
-export interface DailyHabitStatusEntry {
-  activity: string
-  desc?: string
-  start?: string
-  end?: string
-  schedule?: string
-  source?: string
-}
-
-export interface DailyHabitsStatus {
-  active: boolean
-  timezone?: string
-  status?: DailyHabitStatusEntry
-  context?: string
-  now?: string
-}
-
 export interface EmoteCategory {
   name: string
   keywords: string[]

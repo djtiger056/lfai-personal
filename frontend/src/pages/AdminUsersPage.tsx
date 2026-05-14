@@ -33,10 +33,7 @@ type AccessControlConfig = {
   deny_message: string
 }
 
-const ADMIN_TOKEN_KEY = 'admin_token'
-
 const AdminUsersPage: React.FC = () => {
-  const [adminToken, setAdminToken] = useState<string>(() => localStorage.getItem(ADMIN_TOKEN_KEY) || '')
   const [loading, setLoading] = useState(false)
   const [users, setUsers] = useState<AdminUserSummary[]>([])
   const [selectedUser, setSelectedUser] = useState<AdminUserSummary | null>(null)
@@ -59,23 +56,10 @@ const AdminUsersPage: React.FC = () => {
   })
   const [accessControlLoading, setAccessControlLoading] = useState(false)
 
-  const headers = useMemo(() => {
-    return adminToken ? { 'X-Admin-Token': adminToken } : {}
-  }, [adminToken])
-
-  const saveAdminToken = () => {
-    localStorage.setItem(ADMIN_TOKEN_KEY, adminToken)
-    message.success('管理员密钥已保存到本地')
-  }
-
   const loadUsers = async () => {
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥（config.yaml: admin.api_key）')
-      return
-    }
     setLoading(true)
     try {
-      const resp = await api.get('/admin/users', { headers, params: { limit: 200, skip: 0 } })
+      const resp = await api.get('/admin/users', { params: { limit: 200, skip: 0 } })
       setUsers(resp.data.users || [])
     } catch (e: any) {
       message.error(e.response?.data?.detail || '加载用户列表失败')
@@ -85,13 +69,9 @@ const AdminUsersPage: React.FC = () => {
   }
 
   const loadAccessControl = async () => {
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥')
-      return
-    }
     setAccessControlLoading(true)
     try {
-      const resp = await api.get('/access-control', { headers })
+      const resp = await api.get('/access-control')
       setAccessControl(resp.data)
     } catch (e: any) {
       message.error(e.response?.data?.detail || '加载访问控制配置失败')
@@ -101,13 +81,9 @@ const AdminUsersPage: React.FC = () => {
   }
 
   const updateAccessControl = async (values: Partial<AccessControlConfig>) => {
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥')
-      return
-    }
     setAccessControlLoading(true)
     try {
-      await api.put('/access-control', { ...accessControl, ...values }, { headers })
+      await api.put('/access-control', { ...accessControl, ...values })
       message.success('访问控制配置已更新')
       loadAccessControl()
     } catch (e: any) {
@@ -118,10 +94,6 @@ const AdminUsersPage: React.FC = () => {
   }
 
   const openConfigEditor = async (user: AdminUserSummary) => {
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥')
-      return
-    }
     setSelectedUser(user)
     setConfigModalOpen(true)
     setConfigLoading(true)
@@ -129,7 +101,6 @@ const AdminUsersPage: React.FC = () => {
     try {
       const key = user.qq_user_id || String(user.id)
       const resp = await api.get(`/admin/users/${encodeURIComponent(key)}/config`, {
-        headers,
         params: { merged: false },
       })
       const overrides = resp.data.overrides || {}
@@ -143,17 +114,12 @@ const AdminUsersPage: React.FC = () => {
   }
 
   const previewMergedConfig = async (user: AdminUserSummary) => {
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥')
-      return
-    }
     setSelectedUser(user)
     setPreviewModalOpen(true)
     setConfigLoading(true)
     try {
       const key = user.qq_user_id || String(user.id)
       const resp = await api.get(`/admin/users/${encodeURIComponent(key)}/config`, {
-        headers,
         params: { merged: true },
       })
       setPreviewData(resp.data.merged || {})
@@ -167,16 +133,12 @@ const AdminUsersPage: React.FC = () => {
 
   const saveUserConfig = async () => {
     if (!selectedUser) return
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥')
-      return
-    }
 
     try {
       const values = await configForm.validateFields()
       setConfigLoading(true)
       const key = selectedUser.qq_user_id || String(selectedUser.id)
-      await api.put(`/admin/users/${encodeURIComponent(key)}/config`, values, { headers })
+      await api.put(`/admin/users/${encodeURIComponent(key)}/config`, values)
       message.success('配置已保存')
       setConfigModalOpen(false)
     } catch (e: any) {
@@ -194,7 +156,7 @@ const AdminUsersPage: React.FC = () => {
     try {
       const values = await addUserForm.validateFields()
       setConfigLoading(true)
-      await api.post('/admin/users/qq/upsert', values, { headers })
+      await api.post('/admin/users/qq/upsert', values)
       message.success('用户添加成功')
       setAddUserModalOpen(false)
       addUserForm.resetFields()
@@ -211,13 +173,9 @@ const AdminUsersPage: React.FC = () => {
   }
 
   const handleDeleteUser = async (user: AdminUserSummary) => {
-    if (!adminToken) {
-      message.warning('请先输入管理员密钥')
-      return
-    }
     try {
       const key = user.qq_user_id || String(user.id)
-      await api.delete(`/admin/users/${encodeURIComponent(key)}`, { headers })
+      await api.delete(`/admin/users/${encodeURIComponent(key)}`)
       message.success(`用户 ${user.nickname || user.username} 已删除`)
       loadUsers()
     } catch (e: any) {
@@ -257,7 +215,7 @@ const AdminUsersPage: React.FC = () => {
   }, [users])
 
   useEffect(() => {
-    // 不自动拉取，避免未填 token 时误报错
+    loadUsers()
   }, [])
 
   const handleTabChange = (key: string) => {
@@ -287,20 +245,6 @@ const AdminUsersPage: React.FC = () => {
             showIcon
           />
           <Space wrap>
-            <Input.Password
-              style={{ width: 360 }}
-              placeholder="管理员密钥（config.yaml: admin.api_key）"
-              value={adminToken}
-              onChange={(e) => setAdminToken(e.target.value)}
-            />
-            <Alert
-              message="需要管理员密钥"
-              description="请在上面的输入框中输入 config.yaml 文件中的 admin.api_key 值，然后点击保存即可访问多用户配置管理功能。"
-              type="warning"
-              showIcon
-              style={{ marginTop: 16 }}
-            />
-            <Button onClick={saveAdminToken}>保存密钥</Button>
             <Button type="primary" loading={loading} onClick={loadUsers}>
               刷新用户列表
             </Button>

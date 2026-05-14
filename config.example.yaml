@@ -65,6 +65,20 @@ daily_schedule_generation:
   #   temperature: 0.9
   #   max_tokens: 2000
 
+# Agent 委派配置 — 将任务委派给本地 Hermes Agent 执行
+agent_delegate:
+  enabled: false
+  hermes:
+    api_base: http://127.0.0.1:8642
+    api_key: change-me-local-dev
+    timeout: 300
+    poll_interval: 3
+    max_concurrent_tasks: 5
+    instructions: |
+      你是一个能干的助理。语气亲切自然，称呼用户"你"。
+      任务结果该正式就正式（代码用代码块），但可以在开头结尾带一点温度。
+      不要撒娇，不要用颜文字。简洁高效地完成任务。
+
 adapters:
   console:
     enabled: false
@@ -140,6 +154,23 @@ image_generation:
     api_key: ""
     model: ""
     base_url: https://yunwu.ai/v1
+  # Image API 本地服务配置（基于 Jimeng 即梦平台）
+  image_api:
+    api_base: "http://127.0.0.1:18081"  # 本地 Images API 服务地址
+    api_key: ""  # API 密钥，为空时不发送认证头
+    model: "jimeng-4.5"  # 支持: jimeng-4.5, jimeng-4.6, jimeng-5.0
+    timeout: 120  # 请求超时时间（秒）
+    ratio: "1:1"  # 图片比例
+    resolution: "2k"  # 图片分辨率
+    sample_strength: 0.5  # 图生图参考强度，范围 0.0-1.0
+  # GPT-Image 中转站配置（仅支持图生图，计费 0.04 元/张）
+  gpt_image:
+    api_base: ""  # 中转站地址，如 https://your-proxy.com
+    api_key: ""  # 中转站 API Key（Bearer Token）
+    model: "gpt-image-2"  # 模型名称
+    timeout: 180  # 请求超时时间（秒），gpt-image 生图较慢建议 ≥180
+  # 默认兜底底图路径（当用户未上传底图时使用）
+  default_base_image_path: "backend/data/default_base_image.jpg"
 
 vision:
   enabled: false

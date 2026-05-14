@@ -1,46 +1,69 @@
-"""管理员认证依赖（用于多用户配置管理）
+"""管理员认证依赖
 
-说明：此项目支持“机器人面向多用户使用”，但配置管理应由管理员统一下发，避免每个用户都要登录后台。
+基于 JWT 登录令牌验证用户身份，并检查 is_admin 字段。
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from fastapi import Depends, HTTPException, Request, status
 
-from fastapi import Depends, Header, HTTPException, Query, status
-
-from backend.api.deps import get_access_token
-from backend.config import config
+from backend.user.auth import auth_manager
+from backend.user import user_manager
 
 
-def _get_admin_api_key() -> str:
-    admin_cfg = config.get("admin", {}) or {}
-    return str(admin_cfg.get("api_key") or "").strip()
+async def require_admin(request: Request) -> None:
+    """校验当前请求用户是否为管理员。
 
-
-def require_admin(
-    bearer_token: str = Depends(get_access_token),
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-    admin_token: Optional[str] = Query(default=None),
-) -> None:
-    """校验管理员令牌。
-
-    支持以下方式（任意一种即可）：
-    - Header: `X-Admin-Token: <token>`
-    - Query: `?admin_token=<token>`
-    - Header: `Authorization: Bearer <token>`（复用 get_access_token）
+    从 Authorization: Bearer <token> 或 query ?token= 中提取 JWT，
+    解码后验证用户存在且 is_admin == 1。
     """
-    expected = _get_admin_api_key()
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="未配置管理员密钥，请在 config.yaml 的 admin.api_key 设置后重试",
-        )
-
-    provided = (x_admin_token or admin_token or bearer_token or "").strip()
-    if not provided or provided != expected:
+    token = _extract_token(request)
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="管理员认证失败",
+            detail="未提供认证令牌",
         )
 
+    payload = auth_manager.decode_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="令牌无效或已过期",
+        )
+
+    user_id = payload.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="令牌格式错误",
+        )
+
+    user = await user_manager.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在",
+        )
+
+    if not getattr(user, "is_admin", 0):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要管理员权限",
+        )
+
+
+def _extract_token(request: Request) -> str:
+    """从请求中提取 token（Bearer header 或 query param）"""
+    # 优先从 Authorization header
+    auth_header = request.headers.get("authorization", "")
+    if auth_header:
+        parts = auth_header.strip().split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
+            return parts[1].strip()
+
+    # 其次从 query param
+    token = request.query_params.get("token", "")
+    if token:
+        return token
+
+    return ""

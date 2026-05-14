@@ -6,6 +6,7 @@ from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from backend.user.models import User, UserConfig, Base
 from backend.user.auth import auth_manager
+from backend.user.data_manager import user_data_manager
 from backend.config import config
 
 
@@ -29,6 +30,27 @@ class UserManager:
         """初始化数据库表"""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # 自动迁移：为已有数据库添加新列
+            await conn.run_sync(self._migrate_columns)
+
+    @staticmethod
+    def _migrate_columns(connection):
+        """检查并添加缺失的列（兼容已有数据库）"""
+        from sqlalchemy import inspect, text
+        inspector = inspect(connection)
+        columns = [col['name'] for col in inspector.get_columns('users')]
+        if 'linyu_user_id' not in columns:
+            # SQLite 不支持 ALTER TABLE ADD COLUMN ... UNIQUE，需分步操作
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN linyu_user_id VARCHAR(100)"
+            ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_linyu_user_id ON users (linyu_user_id)"
+            ))
+        if 'linyu_account' not in columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN linyu_account VARCHAR(100)"
+            ))
     
     def get_session(self) -> AsyncSession:
         """获取数据库会话"""
@@ -74,9 +96,8 @@ class UserManager:
             session.add(user_config)
             await session.commit()
             
-            # 初始化用户数据目录
-            from backend.user.data_manager import user_data_manager
-            user_data_manager.init_user_data(user.id)
+            # 初始化用户数据目录（按 username 命名）
+            user_data_manager.init_user_data(user.username)
             
             return user
     
@@ -100,6 +121,65 @@ class UserManager:
             stmt = select(User).where(User.qq_user_id == qq_user_id)
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def get_user_by_linyu_id(self, linyu_user_id: str) -> Optional[User]:
+        """根据Linyu用户ID或账号名获取用户"""
+        async with self.get_session() as session:
+            stmt = select(User).where(User.linyu_user_id == linyu_user_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def get_or_create_user_by_linyu_id(
+        self,
+        linyu_user_id: str,
+        *,
+        nickname: Optional[str] = None,
+        avatar: Optional[str] = None,
+    ) -> User:
+        """按 Linyu 用户ID 获取或自动创建用户（免注册）。
+
+        用途：机器人面向 Linyu 多用户使用时，首次接触自动建档，默认继承全局配置。
+        """
+        existing = await self.get_user_by_linyu_id(linyu_user_id)
+        if existing:
+            return existing
+
+        base_username = f"linyu_{linyu_user_id}"
+        username = base_username
+
+        random_password = secrets.token_urlsafe(32)
+        password_hash = auth_manager.hash_password(random_password)
+
+        async with self.get_session() as session:
+            suffix = 0
+            while True:
+                stmt = select(User).where(User.username == username)
+                res = await session.execute(stmt)
+                if res.scalar_one_or_none() is None:
+                    break
+                suffix += 1
+                username = f"{base_username}_{suffix}"
+
+            user = User(
+                username=username,
+                password_hash=password_hash,
+                nickname=nickname or username,
+                linyu_user_id=linyu_user_id,
+                avatar=avatar,
+                is_active=1,
+                is_admin=0,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+            user_config = UserConfig(user_id=user.id)
+            session.add(user_config)
+            await session.commit()
+
+            user_data_manager.init_user_data(user.username)
+
+            return user
 
     async def get_or_create_user_by_qq_id(
         self,
@@ -152,9 +232,8 @@ class UserManager:
             session.add(user_config)
             await session.commit()
 
-            # 初始化用户数据目录
-            from backend.user.data_manager import user_data_manager
-            user_data_manager.init_user_data(user.id)
+            # 初始化用户数据目录（按 username 命名）
+            user_data_manager.init_user_data(user.username)
 
             return user
     
@@ -177,67 +256,78 @@ class UserManager:
         user_id: int,
         config_data: Dict[str, Any]
     ) -> bool:
-        """更新用户配置"""
-        async with self.get_session() as session:
-            stmt = select(UserConfig).where(UserConfig.user_id == user_id)
-            result = await session.execute(stmt)
-            user_config = result.scalar_one_or_none()
-            
-            if not user_config:
+        """更新用户配置（写入用户数据目录的 config.yaml）"""
+        user = await self.get_user_by_id(user_id)
+        if not user:
+            return False
+
+        # 将 API 字段名映射为 config.yaml 顶层键
+        _KEY_MAP = {
+            'llm_config': 'llm',
+            'tts_config': 'tts',
+            'image_gen_config': 'image_generation',
+            'vision_config': 'vision',
+            'prompt_enhancer_config': 'prompt_enhancer',
+            'emote_config': 'emotes',
+            'proactive_chat_config': 'proactive_chat',
+        }
+
+        file_data: Dict[str, Any] = {}
+        for raw_key, value in config_data.items():
+            yaml_key = _KEY_MAP.get(raw_key, raw_key)
+            if value is None:
+                # None 表示重置该键，用空 dict 占位（reset_user_config 会删除）
+                continue
+            # 如果 value 是 JSON 字符串（旧路径兼容），先解析
+            if isinstance(value, str):
+                try:
+                    import json as _json
+                    value = _json.loads(value)
+                except Exception:
+                    pass
+            file_data[yaml_key] = value
+
+        # 处理 None 值（重置）
+        reset_keys = [_KEY_MAP.get(k, k) for k, v in config_data.items() if v is None]
+
+        if file_data:
+            ok = user_data_manager.save_user_config(user.username, file_data)
+            if not ok:
                 return False
-            
-            # 更新配置字段
-            if 'system_prompt' in config_data:
-                user_config.system_prompt = config_data['system_prompt']
-            if 'llm_config' in config_data:
-                user_config.llm_config = json.dumps(config_data['llm_config'])
-            if 'tts_config' in config_data:
-                user_config.tts_config = json.dumps(config_data['tts_config'])
-            if 'image_gen_config' in config_data:
-                user_config.image_gen_config = json.dumps(config_data['image_gen_config'])
-            if 'vision_config' in config_data:
-                user_config.vision_config = json.dumps(config_data['vision_config'])
-            if 'prompt_enhancer_config' in config_data:
-                user_config.prompt_enhancer_config = json.dumps(config_data['prompt_enhancer_config'])
-            if 'emote_config' in config_data:
-                user_config.emote_config = json.dumps(config_data['emote_config'])
-            if 'proactive_chat_config' in config_data:
-                user_config.proactive_chat_config = json.dumps(config_data['proactive_chat_config'])
-            if 'preferences' in config_data:
-                user_config.preferences = json.dumps(config_data['preferences'])
-            
-            await session.commit()
-            return True
-    
+
+        if reset_keys:
+            user_data_manager.reset_user_config(user.username, reset_keys)
+
+        return True
+
     async def get_user_config_dict(self, user_id: int) -> Dict[str, Any]:
-        """获取用户配置字典"""
-        user_config = await self.get_user_config(user_id)
-        if not user_config:
+        """从用户数据目录的 config.yaml 读取用户配置"""
+        user = await self.get_user_by_id(user_id)
+        if not user:
             return {}
-        
-        config_dict = {}
-        
-        # 解析JSON配置
-        if user_config.system_prompt:
-            config_dict['system_prompt'] = user_config.system_prompt
-        if user_config.llm_config:
-            config_dict['llm'] = json.loads(user_config.llm_config)
-        if user_config.tts_config:
-            config_dict['tts'] = json.loads(user_config.tts_config)
-        if user_config.image_gen_config:
-            config_dict['image_generation'] = json.loads(user_config.image_gen_config)
-        if user_config.vision_config:
-            config_dict['vision'] = json.loads(user_config.vision_config)
-        if user_config.prompt_enhancer_config:
-            config_dict['prompt_enhancer'] = json.loads(user_config.prompt_enhancer_config)
-        if user_config.emote_config:
-            config_dict['emotes'] = json.loads(user_config.emote_config)
-        if user_config.proactive_chat_config:
-            config_dict['proactive_chat'] = json.loads(user_config.proactive_chat_config)
-        if user_config.preferences:
-            config_dict['preferences'] = json.loads(user_config.preferences)
-        
-        return config_dict
+
+        data = user_data_manager.load_user_config(user.username)
+        if not data:
+            return {}
+
+        # 统一字段名（与 UserConfigResponse 对齐）
+        result: Dict[str, Any] = {}
+        _YAML_TO_API = {
+            'llm': 'llm',
+            'tts': 'tts',
+            'image_generation': 'image_generation',
+            'vision': 'vision',
+            'prompt_enhancer': 'prompt_enhancer',
+            'emotes': 'emotes',
+            'proactive_chat': 'proactive_chat',
+            'system_prompt': 'system_prompt',
+            'preferences': 'preferences',
+        }
+        for yaml_key, api_key in _YAML_TO_API.items():
+            if yaml_key in data:
+                result[api_key] = data[yaml_key]
+
+        return result
     
     async def list_users(self, skip: int = 0, limit: int = 100) -> list[User]:
         """列出用户"""
@@ -253,6 +343,8 @@ class UserManager:
         avatar: Optional[str] = None,
         is_active: Optional[int] = None,
         qq_user_id: Optional[str] = None,
+        linyu_user_id: Optional[str] = None,
+        linyu_account: Optional[str] = None,
     ) -> bool:
         """更新用户信息"""
         async with self.get_session() as session:
@@ -271,6 +363,10 @@ class UserManager:
                 user.is_active = is_active
             if qq_user_id is not None:
                 user.qq_user_id = qq_user_id
+            if linyu_user_id is not None:
+                user.linyu_user_id = linyu_user_id
+            if linyu_account is not None:
+                user.linyu_account = linyu_account
             
             await session.commit()
             return True

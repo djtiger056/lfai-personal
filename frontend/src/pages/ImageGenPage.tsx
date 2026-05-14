@@ -16,8 +16,9 @@ import {
   Col,
   Image,
   Spin,
+  Upload,
 } from 'antd';
-import { PictureOutlined, ExperimentOutlined } from '@ant-design/icons';
+import { PictureOutlined, ExperimentOutlined, UploadOutlined, DeleteOutlined } from '@ant-design/icons';
 import { imageGenApi } from '@/services/api';
 import { imageGenConfigProxy } from '@/services/configProxy';
 import { Link } from 'react-router-dom';
@@ -49,6 +50,23 @@ interface KlingApiConfig {
   response_format: string;
 }
 
+interface ImageApiConfig {
+  api_base: string;
+  api_key: string;
+  model: string;
+  timeout: number;
+  ratio: string;
+  resolution: string;
+  sample_strength: number;
+}
+
+interface GptImageConfig {
+  api_base: string;
+  api_key: string;
+  model: string;
+  timeout: number;
+}
+
 interface ImageGenConfig {
   enabled: boolean;
   provider: string;
@@ -57,6 +75,8 @@ interface ImageGenConfig {
   modelscope: ModelScopeConfig;
   yunwu: YunwuConfig;
   kling_api: KlingApiConfig;
+  image_api: ImageApiConfig;
+  gpt_image: GptImageConfig;
   trigger_keywords: string[];
   generating_message: string;
   error_message: string;
@@ -67,6 +87,8 @@ const providerOptions = [
   { value: 'modelscope', label: '魔搭社区' },
   { value: 'yunwu', label: 'yunwu.ai' },
   { value: 'kling_api', label: '本地 kling-api' },
+  { value: 'image_api', label: 'Image API (即梦/豆包/小云雀)' },
+  { value: 'gpt_image', label: 'GPT-Image (图生图中转站)' },
 ];
 
 const ImageGenPage: React.FC = () => {
@@ -102,6 +124,21 @@ const ImageGenPage: React.FC = () => {
       target_url: 'https://klingai.com/app/image/new',
       response_format: 'url',
     },
+    image_api: {
+      api_base: 'http://127.0.0.1:18081',
+      api_key: '',
+      model: 'doubao-seedream-4.5',
+      timeout: 120,
+      ratio: '1:1',
+      resolution: '2k',
+      sample_strength: 0.5,
+    },
+    gpt_image: {
+      api_base: '',
+      api_key: '',
+      model: 'gpt-image-2',
+      timeout: 180,
+    },
     trigger_keywords: ['画', '生成图片', '生图', '绘制'],
     generating_message: '🎨 正在为你生成图片，请稍候...',
     error_message: '😢 图片生成失败：{error}',
@@ -116,11 +153,38 @@ const ImageGenPage: React.FC = () => {
 
   const yunwuModels = ['jimeng-4.5', 'stable-diffusion-xl', 'dall-e-3'];
   const klingModels = ['kling-v2-1'];
+  const imageApiModels = [
+    // Doubao（豆包）
+    'doubao-seedream-4.5', 'doubao-seedream-4.0', 'doubao-seedream-3.0',
+    // XYQ（小云雀）
+    'xyq-seedream-5.0', 'xyq-seedream-4.5', 'xyq-seedream-4.0',
+    // Jimeng（即梦）
+    'jimeng-5.0', 'jimeng-4.6', 'jimeng-4.5',
+    // Kling（可灵）
+    'kling-v2-1', 'kling-v3-omni', 'kling-image-o1',
+  ];
   const currentProvider = Form.useWatch('provider', form) || 'modelscope';
+
+  const [baseImage, setBaseImage] = useState<{ image_data?: string; filename?: string; file_size?: number; mime_type?: string; last_modified?: string } | null>(null);
+  const [baseImageLoading, setBaseImageLoading] = useState(false);
 
   useEffect(() => {
     loadConfig();
+    loadBaseImage();
   }, []);
+
+  const loadBaseImage = async () => {
+    try {
+      setBaseImageLoading(true);
+      const result = await imageGenApi.getBaseImage();
+      setBaseImage(result);
+    } catch (error) {
+      // 404 means no image, which is fine
+      setBaseImage(null);
+    } finally {
+      setBaseImageLoading(false);
+    }
+  };
 
   const loadConfig = async () => {
     try {
@@ -182,6 +246,35 @@ const ImageGenPage: React.FC = () => {
     }
   };
 
+  const handleBaseImageUpload = async (file: File) => {
+    try {
+      setBaseImageLoading(true);
+      await imageGenApi.uploadBaseImage(file);
+      message.success('底图上传成功');
+      await loadBaseImage();
+    } catch (error: any) {
+      const detail = error.response?.data?.detail || '上传失败';
+      message.error(detail);
+    } finally {
+      setBaseImageLoading(false);
+    }
+    return false; // prevent default upload behavior
+  };
+
+  const handleBaseImageDelete = async () => {
+    try {
+      setBaseImageLoading(true);
+      await imageGenApi.deleteBaseImage();
+      message.success('底图已删除');
+      setBaseImage(null);
+    } catch (error: any) {
+      const detail = error.response?.data?.detail || '删除失败';
+      message.error(detail);
+    } finally {
+      setBaseImageLoading(false);
+    }
+  };
+
   const renderProviderFields = () => {
     if (currentProvider === 'modelscope') {
       return (
@@ -231,6 +324,122 @@ const ImageGenPage: React.FC = () => {
           </Form.Item>
           <Form.Item name={['yunwu', 'timeout']} label="超时时间（秒）">
             <InputNumber min={30} max={300} style={{ width: '100%' }} />
+          </Form.Item>
+        </>
+      );
+    }
+
+    if (currentProvider === 'image_api') {
+      return (
+        <>
+          <Divider>Image API 配置（即梦/豆包/小云雀/可灵）</Divider>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="接入说明"
+            description="连接 Images API 统一服务，支持即梦、豆包、小云雀、可灵四大平台。通过切换模型名称选择不同平台。支持文生图和图生图。"
+          />
+          <Form.Item
+            name={['image_api', 'api_base']}
+            label="API 地址"
+            rules={[{ required: true, message: '请输入 API 地址' }]}
+          >
+            <Input placeholder="http://127.0.0.1:18081" />
+          </Form.Item>
+          <Form.Item name={['image_api', 'api_key']} label="API Key">
+            <Input.Password placeholder="未开启鉴权可留空" />
+          </Form.Item>
+          <Form.Item
+            name={['image_api', 'model']}
+            label="模型"
+            rules={[{ required: true, message: '请选择模型' }]}
+          >
+            <Select
+              options={imageApiModels.map((model) => {
+                let label = model;
+                if (model.startsWith('doubao-')) label = `🫘 ${model}`;
+                else if (model.startsWith('xyq-')) label = `🐦 ${model}`;
+                else if (model.startsWith('jimeng-')) label = `✨ ${model}`;
+                else if (model.startsWith('kling-')) label = `🎬 ${model}`;
+                return { value: model, label };
+              })}
+            />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name={['image_api', 'ratio']} label="图片比例">
+                <Select
+                  options={[
+                    { value: '1:1', label: '1:1' },
+                    { value: '16:9', label: '16:9' },
+                    { value: '9:16', label: '9:16' },
+                    { value: '4:3', label: '4:3' },
+                    { value: '3:4', label: '3:4' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['image_api', 'resolution']} label="分辨率">
+                <Select
+                  options={[
+                    { value: '1k', label: '1K' },
+                    { value: '2k', label: '2K' },
+                    { value: '4k', label: '4K' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['image_api', 'timeout']} label="超时（秒）">
+                <InputNumber min={30} max={600} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item
+            name={['image_api', 'sample_strength']}
+            label="图生图参考强度"
+            tooltip="值越大，生成图片越接近参考底图。范围 0.0-1.0"
+          >
+            <InputNumber min={0} max={1} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
+        </>
+      );
+    }
+
+    if (currentProvider === 'gpt_image') {
+      return (
+        <>
+          <Divider>GPT-Image 中转站配置（仅图生图）</Divider>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="仅支持图生图"
+            description="此提供商通过中转站调用 gpt-4o-image 模型，仅支持图生图（需要用户上传底图）。不支持纯文生图。计费：0.04 元/张。"
+          />
+          <Form.Item
+            name={['gpt_image', 'api_base']}
+            label="中转站地址"
+            rules={[{ required: true, message: '请输入中转站 API 地址' }]}
+          >
+            <Input placeholder="https://your-proxy.com" />
+          </Form.Item>
+          <Form.Item
+            name={['gpt_image', 'api_key']}
+            label="API Key"
+            rules={[{ required: true, message: '请输入中转站 API Key' }]}
+          >
+            <Input.Password placeholder="Bearer Token 格式的 API Key" />
+          </Form.Item>
+          <Form.Item name={['gpt_image', 'model']} label="模型">
+            <Select
+              options={[{ value: 'gpt-image-2', label: 'gpt-image-2' }]}
+            />
+          </Form.Item>
+          <Form.Item name={['gpt_image', 'timeout']} label="超时时间（秒）">
+            <InputNumber min={30} max={600} style={{ width: '100%' }} />
           </Form.Item>
         </>
       );
@@ -389,6 +598,63 @@ const ImageGenPage: React.FC = () => {
         </Col>
 
         <Col span={8}>
+          {(currentProvider === 'image_api' || currentProvider === 'gpt_image') && (
+            <Card title="AI 伴侣底图" style={{ marginBottom: '16px' }} loading={baseImageLoading}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                {baseImage?.image_data ? (
+                  <>
+                    <Image
+                      src={`data:${baseImage.mime_type || 'image/jpeg'};base64,${baseImage.image_data}`}
+                      alt="底图"
+                      style={{ width: '100%', borderRadius: 8 }}
+                    />
+                    <Text type="secondary">
+                      {baseImage.filename} ({((baseImage.file_size || 0) / 1024).toFixed(1)} KB)
+                    </Text>
+                    <Space>
+                      <Upload
+                        accept=".jpg,.jpeg,.png,.webp"
+                        showUploadList={false}
+                        beforeUpload={handleBaseImageUpload}
+                      >
+                        <Button icon={<UploadOutlined />} size="small">
+                          更换底图
+                        </Button>
+                      </Upload>
+                      <Button
+                        icon={<DeleteOutlined />}
+                        size="small"
+                        danger
+                        onClick={handleBaseImageDelete}
+                      >
+                        删除
+                      </Button>
+                    </Space>
+                  </>
+                ) : (
+                  <>
+                    <Alert
+                      message="未上传底图"
+                      description="上传一张 AI 伴侣大头照作为底图，图生图时会自动使用该底图保持外观一致性。未上传时使用系统默认图片。"
+                      type="info"
+                      showIcon
+                    />
+                    <Upload
+                      accept=".jpg,.jpeg,.png,.webp"
+                      showUploadList={false}
+                      beforeUpload={handleBaseImageUpload}
+                    >
+                      <Button icon={<UploadOutlined />} type="primary" block>
+                        上传底图
+                      </Button>
+                    </Upload>
+                    <Text type="secondary">支持 JPEG/PNG/WebP，最大 5MB</Text>
+                  </>
+                )}
+              </Space>
+            </Card>
+          )}
+
           <Card title="测试功能">
             <Space direction="vertical" style={{ width: '100%' }}>
               <Button type="primary" onClick={generateTestImage} loading={generateLoading} block>

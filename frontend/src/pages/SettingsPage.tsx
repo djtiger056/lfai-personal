@@ -55,12 +55,25 @@ const SettingsPage: React.FC = () => {
       setLoading(true)
       const formValues = form.getFieldsValue()
       
-      // 合并当前配置和表单值
+      // 深度合并：用表单值覆盖当前配置，保留未展示的嵌套字段
       const currentConfig = (config || {}) as any
+
+      const deepMerge = (target: any, source: any): any => {
+        const result = { ...target }
+        for (const key of Object.keys(source ?? {})) {
+          if (source[key] !== null && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+            result[key] = deepMerge(target?.[key] ?? {}, source[key])
+          } else if (source[key] !== undefined) {
+            result[key] = source[key]
+          }
+        }
+        return result
+      }
+
       const values = {
-        llm: { ...currentConfig.llm, ...formValues.llm },
-        adapters: { ...currentConfig.adapters, ...formValues.adapters },
-        system_prompt: formValues.system_prompt || currentConfig.system_prompt
+        llm: deepMerge(currentConfig.llm, formValues.llm),
+        adapters: deepMerge(currentConfig.adapters, formValues.adapters),
+        system_prompt: formValues.system_prompt ?? currentConfig.system_prompt,
       }
       
       await systemConfigProxy.updateConfig(values)
@@ -224,165 +237,286 @@ const SettingsPage: React.FC = () => {
           </Tabs.TabPane>
 
           <Tabs.TabPane tab="适配器配置" key="adapters">
-            <Form
-              form={form}
-              layout="vertical"
-            >
-              <Divider>控制台适配器</Divider>
-              <Form.Item
-                name={['adapters', 'console', 'enabled']}
-                label="启用控制台适配器"
-                valuePropName="checked"
-              >
-                <Switch checkedChildren="启用" unCheckedChildren="禁用" />
-              </Form.Item>
+            <Form form={form} layout="vertical">
+              <Alert
+                message="适配器说明"
+                description="适配器决定机器人通过哪些渠道收发消息。启用后需重启后端服务才能生效。可同时启用多个适配器。"
+                type="info"
+                showIcon
+                style={{ marginBottom: 20 }}
+              />
 
-              <Divider>QQ适配器</Divider>
-              <Form.Item
-                name={['adapters', 'qq', 'enabled']}
-                label="启用QQ适配器"
-                valuePropName="checked"
-              >
-                <Switch checkedChildren="启用" unCheckedChildren="禁用" />
-              </Form.Item>
-
-              <Form.Item
-                name={['adapters', 'qq', 'ws_host']}
-                label="WebSocket地址"
-                help="NapCat WebSocket地址"
-              >
-                <Input placeholder="127.0.0.1" />
-              </Form.Item>
-
-              <Form.Item
-                name={['adapters', 'qq', 'ws_port']}
-                label="WebSocket端口"
-                help="NapCat WebSocket端口"
-              >
-                <InputNumber min={1} max={65535} style={{ width: '100%' }} />
-              </Form.Item>
-
-              <Form.Item
-                name={['adapters', 'qq', 'access_token']}
-                label="访问令牌"
-                help="访问令牌（可选）"
-              >
-                <Input placeholder="留空表示不使用认证" />
-              </Form.Item>
-
-              <Form.Item
-                name={['adapters', 'qq', 'need_at']}
-                label="需要@机器人"
-                valuePropName="checked"
-                help="群聊中是否需要@机器人才回复"
-              >
-                <Switch checkedChildren="需要" unCheckedChildren="不需要" />
-              </Form.Item>
-
-              <Divider>分段发送配置</Divider>
-              
-              <Form.Item
-                name={['adapters', 'qq', 'segment_config', 'enabled']}
-                label="启用分段发送"
-                valuePropName="checked"
-                help="将长消息分段发送，模拟真人聊天节奏"
-              >
-                <Switch checkedChildren="启用" unCheckedChildren="禁用" />
-              </Form.Item>
-
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item
-                    name={['adapters', 'qq', 'segment_config', 'max_segment_length']}
-                    label="每段最大长度"
-                    help="超过此长度的消息会被分段"
-                  >
-                    <InputNumber 
-                      min={10} 
-                      max={500} 
-                      step={10} 
-                      style={{ width: '100%' }} 
-                      placeholder="默认100" 
-                    />
+              {/* ── 控制台适配器 ── */}
+              <Card
+                size="small"
+                style={{ marginBottom: 16, borderRadius: 8 }}
+                title={
+                  <Space>
+                    <span>🖥️ 控制台适配器</span>
+                    <Tag color="default">调试用</Tag>
+                  </Space>
+                }
+                extra={
+                  <Form.Item name={['adapters', 'console', 'enabled']} valuePropName="checked" noStyle>
+                    <Switch checkedChildren="已启用" unCheckedChildren="已禁用" />
                   </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item
-                    name={['adapters', 'qq', 'segment_config', 'min_segment_length']}
-                    label="每段最小长度"
-                    help="低于此长度的段落不会被单独发送"
-                  >
-                    <InputNumber 
-                      min={1} 
-                      max={100} 
-                      step={1} 
-                      style={{ width: '100%' }} 
-                      placeholder="默认5" 
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-
-              <Form.Item
-                label="段间延迟范围（秒）"
-                help="每段消息发送之间的随机延迟，模拟真人输入"
+                }
               >
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Form.Item
-                      name={['adapters', 'qq', 'segment_config', 'delay_range', 0]}
-                      noStyle
-                    >
-                      <InputNumber 
-                        min={0.1} 
-                        max={10} 
-                        step={0.1} 
-                        style={{ width: '100%' }} 
-                        placeholder="最小延迟，默认0.5" 
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col span={12}>
-                    <Form.Item
-                      name={['adapters', 'qq', 'segment_config', 'delay_range', 1]}
-                      noStyle
-                    >
-                      <InputNumber 
-                        min={0.1} 
-                        max={10} 
-                        step={0.1} 
-                        style={{ width: '100%' }} 
-                        placeholder="最大延迟，默认2.0" 
-                      />
-                    </Form.Item>
-                  </Col>
-                </Row>
-              </Form.Item>
-
-              <Form.Item
-                name={['adapters', 'qq', 'segment_config', 'strategy']}
-                label="分割策略"
-                help="按句子分割（更自然）或按长度分割（更均匀）"
-              >
-                <Select placeholder="选择分割策略">
-                  <Option value="sentence">按句子分段</Option>
-                  <Option value="length">按长度分段</Option>
-                </Select>
-              </Form.Item>
-
-              <Form.Item
-                name={['adapters', 'qq', 'segment_config', 'min_sentences_to_split']}
-                label="最小句子数阈值"
-                help="消息包含的句子数达到此阈值时，即使长度不长也会分段发送"
-              >
-                <InputNumber 
-                  min={1} 
-                  max={10} 
-                  step={1} 
-                  style={{ width: '100%' }} 
-                  placeholder="默认2" 
+                <Alert
+                  message="在后端终端中直接输入消息与机器人对话，适合本地调试。无需额外配置。"
+                  type="info"
+                  showIcon={false}
+                  style={{ background: 'transparent', border: 'none', padding: 0 }}
                 />
-              </Form.Item>
+              </Card>
+
+              {/* ── QQ 适配器 ── */}
+              <Card
+                size="small"
+                style={{ marginBottom: 16, borderRadius: 8 }}
+                title={
+                  <Space>
+                    <span>🐧 QQ 适配器</span>
+                    <Tag color="blue">NapCat / OneBot</Tag>
+                  </Space>
+                }
+                extra={
+                  <Form.Item name={['adapters', 'qq', 'enabled']} valuePropName="checked" noStyle>
+                    <Switch checkedChildren="已启用" unCheckedChildren="已禁用" />
+                  </Form.Item>
+                }
+              >
+                <Form.Item noStyle shouldUpdate={(prev, cur) =>
+                  prev?.adapters?.qq?.enabled !== cur?.adapters?.qq?.enabled
+                }>
+                  {({ getFieldValue }) =>
+                    getFieldValue(['adapters', 'qq', 'enabled']) ? (
+                      <>
+                        <Divider orientation="left" plain style={{ marginTop: 8 }}>连接配置</Divider>
+                        <Row gutter={16}>
+                          <Col span={16}>
+                            <Form.Item name={['adapters', 'qq', 'ws_host']} label="WebSocket 地址" help="NapCat 监听地址">
+                              <Input placeholder="127.0.0.1" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name={['adapters', 'qq', 'ws_port']} label="端口">
+                              <InputNumber min={1} max={65535} style={{ width: '100%' }} placeholder="3001" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Form.Item name={['adapters', 'qq', 'access_token']} label="访问令牌（可选）">
+                          <Input.Password placeholder="留空表示不使用认证" />
+                        </Form.Item>
+                        <Form.Item
+                          name={['adapters', 'qq', 'need_at']}
+                          label="群聊需要 @ 机器人"
+                          valuePropName="checked"
+                          help="开启后群聊中必须 @ 机器人才会回复"
+                        >
+                          <Switch checkedChildren="需要" unCheckedChildren="不需要" />
+                        </Form.Item>
+
+                        <Divider orientation="left" plain>分段发送</Divider>
+                        <Form.Item
+                          name={['adapters', 'qq', 'segment_config', 'enabled']}
+                          label="启用分段发送"
+                          valuePropName="checked"
+                          help="将长消息拆分多段发送，模拟真人打字节奏"
+                        >
+                          <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+                        </Form.Item>
+                        <Row gutter={16}>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'qq', 'segment_config', 'max_segment_length']} label="每段最大长度">
+                              <InputNumber min={10} max={500} step={10} style={{ width: '100%' }} placeholder="100" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'qq', 'segment_config', 'min_segment_length']} label="每段最小长度">
+                              <InputNumber min={1} max={100} style={{ width: '100%' }} placeholder="5" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Form.Item label="段间延迟范围（秒）" help="每段之间的随机等待时间">
+                          <Row gutter={16}>
+                            <Col span={12}>
+                              <Form.Item name={['adapters', 'qq', 'segment_config', 'delay_range', 0]} noStyle>
+                                <InputNumber min={0.1} max={10} step={0.1} style={{ width: '100%' }} placeholder="最小 0.5" />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item name={['adapters', 'qq', 'segment_config', 'delay_range', 1]} noStyle>
+                                <InputNumber min={0.1} max={10} step={0.1} style={{ width: '100%' }} placeholder="最大 2.0" />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        </Form.Item>
+                        <Row gutter={16}>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'qq', 'segment_config', 'strategy']} label="分割策略">
+                              <Select>
+                                <Option value="sentence">按句子分段（更自然）</Option>
+                                <Option value="length">按长度分段（更均匀）</Option>
+                              </Select>
+                            </Form.Item>
+                          </Col>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'qq', 'segment_config', 'min_sentences_to_split']} label="最小句子数阈值">
+                              <InputNumber min={1} max={10} style={{ width: '100%' }} placeholder="2" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </>
+                    ) : (
+                      <Alert message="启用后展开详细配置" type="warning" showIcon={false}
+                        style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6 }} />
+                    )
+                  }
+                </Form.Item>
+              </Card>
+
+              {/* ── Linyu 适配器 ── */}
+              <Card
+                size="small"
+                style={{ marginBottom: 16, borderRadius: 8 }}
+                title={
+                  <Space>
+                    <span>💬 Linyu 适配器</span>
+                    <Tag color="purple">Linyu IM</Tag>
+                  </Space>
+                }
+                extra={
+                  <Form.Item name={['adapters', 'linyu', 'enabled']} valuePropName="checked" noStyle>
+                    <Switch checkedChildren="已启用" unCheckedChildren="已禁用" />
+                  </Form.Item>
+                }
+              >
+                <Form.Item noStyle shouldUpdate={(prev, cur) =>
+                  prev?.adapters?.linyu?.enabled !== cur?.adapters?.linyu?.enabled
+                }>
+                  {({ getFieldValue }) =>
+                    getFieldValue(['adapters', 'linyu', 'enabled']) ? (
+                      <>
+                        <Divider orientation="left" plain style={{ marginTop: 8 }}>账号配置</Divider>
+                        <Row gutter={16}>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'account']} label="账号">
+                              <Input placeholder="Linyu 登录账号" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'password']} label="密码">
+                              <Input.Password placeholder="Linyu 登录密码" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+
+                        <Divider orientation="left" plain>服务器地址</Divider>
+                        <Row gutter={16}>
+                          <Col span={14}>
+                            <Form.Item name={['adapters', 'linyu', 'http_host']} label="HTTP 地址" help="Linyu 服务器 IP 或域名">
+                              <Input placeholder="127.0.0.1" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={10}>
+                            <Form.Item name={['adapters', 'linyu', 'http_port']} label="HTTP 端口">
+                              <InputNumber min={1} max={65535} style={{ width: '100%' }} placeholder="9200" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Row gutter={16}>
+                          <Col span={14}>
+                            <Form.Item name={['adapters', 'linyu', 'ws_host']} label="WebSocket 地址">
+                              <Input placeholder="127.0.0.1" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={10}>
+                            <Form.Item name={['adapters', 'linyu', 'ws_port']} label="WebSocket 端口">
+                              <InputNumber min={1} max={65535} style={{ width: '100%' }} placeholder="9100" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+
+                        <Divider orientation="left" plain>目标用户</Divider>
+                        <Row gutter={16}>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'target_user_id']} label="目标用户 ID" help="留空则不限制">
+                              <Input placeholder="指定聊天对象的用户 ID" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'target_user_account']} label="目标用户账号">
+                              <Input placeholder="指定聊天对象的账号" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Form.Item
+                          name={['adapters', 'linyu', 'auto_bind_first_user']}
+                          label="自动绑定首个用户"
+                          valuePropName="checked"
+                          help="首次收到消息时自动将发送者设为目标用户"
+                        >
+                          <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+                        </Form.Item>
+
+                        <Divider orientation="left" plain>分段发送</Divider>
+                        <Form.Item
+                          name={['adapters', 'linyu', 'segment_config', 'enabled']}
+                          label="启用分段发送"
+                          valuePropName="checked"
+                        >
+                          <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+                        </Form.Item>
+                        <Row gutter={16}>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'segment_config', 'max_segment_length']} label="每段最大长度">
+                              <InputNumber min={10} max={500} step={10} style={{ width: '100%' }} placeholder="100" />
+                            </Form.Item>
+                          </Col>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'segment_config', 'min_segment_length']} label="每段最小长度">
+                              <InputNumber min={1} max={100} style={{ width: '100%' }} placeholder="5" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Form.Item label="段间延迟范围（秒）">
+                          <Row gutter={16}>
+                            <Col span={12}>
+                              <Form.Item name={['adapters', 'linyu', 'segment_config', 'delay_range', 0]} noStyle>
+                                <InputNumber min={0.1} max={10} step={0.1} style={{ width: '100%' }} placeholder="最小 0.5" />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item name={['adapters', 'linyu', 'segment_config', 'delay_range', 1]} noStyle>
+                                <InputNumber min={0.1} max={10} step={0.1} style={{ width: '100%' }} placeholder="最大 2.0" />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        </Form.Item>
+                        <Row gutter={16}>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'segment_config', 'strategy']} label="分割策略">
+                              <Select>
+                                <Option value="sentence">按句子分段（更自然）</Option>
+                                <Option value="length">按长度分段（更均匀）</Option>
+                              </Select>
+                            </Form.Item>
+                          </Col>
+                          <Col span={12}>
+                            <Form.Item name={['adapters', 'linyu', 'segment_config', 'min_sentences_to_split']} label="最小句子数阈值">
+                              <InputNumber min={1} max={10} style={{ width: '100%' }} placeholder="2" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </>
+                    ) : (
+                      <Alert message="启用后展开详细配置" type="warning" showIcon={false}
+                        style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6 }} />
+                    )
+                  }
+                </Form.Item>
+              </Card>
             </Form>
           </Tabs.TabPane>
 

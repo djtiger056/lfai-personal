@@ -21,6 +21,8 @@ class User(Base):
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     qq_user_id = Column(String(50), unique=True, nullable=True, index=True)  # QQ用户ID
+    linyu_user_id = Column(String(100), unique=True, nullable=True, index=True)  # Linyu用户ID（UUID）
+    linyu_account = Column(String(100), nullable=True)  # Linyu账号名（用于显示）
     nickname = Column(String(50), nullable=True)
     avatar = Column(String(255), nullable=True)
     is_active = Column(Integer, default=1)  # 1: 启用, 0: 禁用

@@ -43,6 +43,8 @@ from backend.api.user_config import router as user_config_router
 from backend.api.admin_users import router as admin_users_router
 from backend.api.voice_session import router as voice_session_router
 from backend.api.daily_schedule import router as daily_schedule_router
+from backend.api.prompt import router as prompt_router
+from backend.api.agent_delegate import router as agent_delegate_router
 from backend.user import user_manager
 
 # 创建 FastAPI 应用
@@ -91,6 +93,8 @@ app.include_router(user_config_router)
 app.include_router(admin_users_router)
 app.include_router(voice_session_router)
 app.include_router(daily_schedule_router)
+app.include_router(prompt_router)
+app.include_router(agent_delegate_router)
 
 
 @app.get("/api/health")
@@ -270,6 +274,34 @@ async def start_adapters():
             print("🤖 主动聊天调度器已启动")
             if proactive_scheduler.task:
                 tasks.append(proactive_scheduler.task)
+
+        # 启动 Agent 委派器
+        if bot.agent_delegator and bot.agent_delegator.enabled:
+            # 委派结果推送回调 — 直接发送完整文本，不分段
+            async def _delegate_push(target: dict, payload):
+                """Agent 委派结果推送回调 — 完整发送，不分段"""
+                channel = target.get("channel", "web")
+                user = target.get("user_id")
+                text = str(payload) if not isinstance(payload, dict) else (payload.get("text") or "")
+
+                if not user or not text:
+                    return
+
+                if channel == "linyu_private" and linyu_adapter:
+                    await linyu_adapter._send_text_once(user, text, is_group=False)
+                elif channel == "qq_private" and qq_adapter:
+                    await qq_adapter.send_private_message(user, text)
+                elif channel == "qq_group" and qq_adapter:
+                    group = target.get("session_id", user)
+                    await qq_adapter.send_group_message(group, text)
+                elif proactive_scheduler:
+                    # 降级到 web 队列
+                    await proactive_scheduler.enqueue_web_message(target, payload)
+
+            bot.agent_delegator.set_push_callback(_delegate_push)
+
+            await bot.agent_delegator.start()
+            print("🚀 Agent 委派器已启动")
 
         if cerebellum_engine:
             await cerebellum_engine.start()

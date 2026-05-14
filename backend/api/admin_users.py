@@ -24,6 +24,7 @@ class AdminUserSummary(BaseModel):
     username: str
     nickname: Optional[str] = None
     qq_user_id: Optional[str] = None
+    linyu_user_id: Optional[str] = None
     is_active: int
     is_admin: int
     created_at: str
@@ -42,6 +43,7 @@ class AdminUpsertQQUserRequest(BaseModel):
 class AdminUserConfigResponse(BaseModel):
     user_id: int
     qq_user_id: Optional[str] = None
+    linyu_user_id: Optional[str] = None
     overrides: Dict[str, Any] = Field(default_factory=dict)
     merged: Optional[Dict[str, Any]] = None
 
@@ -77,6 +79,11 @@ async def _resolve_user(user_key: str):
     if user:
         return user
 
+    # 按 linyu_user_id 查
+    user = await user_manager.get_user_by_linyu_id(user_key)
+    if user:
+        return user
+
     if user_key.isdigit():
         user_by_id = await user_manager.get_user_by_id(int(user_key))
         if user_by_id:
@@ -96,6 +103,7 @@ async def list_users(limit: int = 200, skip: int = 0):
                 username=u.username,
                 nickname=u.nickname,
                 qq_user_id=u.qq_user_id,
+                linyu_user_id=u.linyu_user_id,
                 is_active=u.is_active,
                 is_admin=u.is_admin,
                 created_at=u.created_at.isoformat() if getattr(u, "created_at", None) else "",
@@ -119,6 +127,7 @@ async def upsert_qq_user(request: AdminUpsertQQUserRequest):
         username=user.username,
         nickname=user.nickname,
         qq_user_id=user.qq_user_id,
+        linyu_user_id=user.linyu_user_id,
         is_active=user.is_active,
         is_admin=user.is_admin,
         created_at=user.created_at.isoformat() if getattr(user, "created_at", None) else "",
@@ -137,6 +146,7 @@ async def get_user_config(user_key: str, merged: bool = True):
     return AdminUserConfigResponse(
         user_id=user.id,
         qq_user_id=user.qq_user_id,
+        linyu_user_id=user.linyu_user_id,
         overrides=overrides,
         merged=merged_cfg,
     )
@@ -177,6 +187,7 @@ async def update_user_config(user_key: str, request: AdminUpdateUserConfigReques
     return AdminUserConfigResponse(
         user_id=user.id,
         qq_user_id=user.qq_user_id,
+        linyu_user_id=user.linyu_user_id,
         overrides=overrides,
         merged=merged_cfg,
     )
@@ -187,9 +198,9 @@ async def delete_user(user_key: str):
     """删除用户"""
     user = await _resolve_user(user_key)
     
-    # 同时删除用户数据文件
+    # 同时删除用户数据文件（按 username 命名的目录）
     from backend.user import user_data_manager
-    user_data_manager.delete_user_data(user.id)
+    user_data_manager.delete_user_data(user.username)
     
     success = await user_manager.delete_user(user.id)
     if not success:
@@ -249,7 +260,7 @@ async def get_user_storage_stats(user_key: str):
     user = await _resolve_user(user_key)
     
     from backend.user import user_data_manager
-    stats = user_data_manager.get_user_storage_stats(user.id)
+    stats = user_data_manager.get_user_storage_stats(user.username)
     
     return {
         "user_id": user.id,

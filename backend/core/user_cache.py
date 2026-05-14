@@ -18,6 +18,7 @@ from ..image_gen import ImageGenerationManager, ImageGenerationConfig
 from ..user import user_manager
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now
+from ..prompt_system import prompt_manager
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,9 @@ class UserResourceCache:
         # 用户配置缓存
         self._user_configs: Dict[str, Dict[str, Any]] = {}
         self._user_config_cache_time: Dict[str, datetime] = {}
+
+        # user_id -> username 映射缓存（用于提示词系统）
+        self._user_id_to_username: Dict[str, str] = {}
 
         # 用户级别的 LLM Provider 实例缓存
         self._user_providers: Dict[str, Any] = {}
@@ -74,24 +78,35 @@ class UserResourceCache:
         user_config = {}
 
         try:
-            user = await user_manager.get_user_by_qq_id(user_id)
-            if user:
-                user_config = await user_manager.get_user_config_dict(user.id)
-            else:
-                # QQ 多用户：首次接触自动建档
-                if str(user_id).isdigit():
+            # Web 端传数字字符串 user_id，QQ 端传 QQ 号（也是数字字符串）
+            # 优先按数字 ID 查（Web 端），再按 QQ ID 查（QQ 端）
+            user = None
+
+            if str(user_id).isdigit():
+                user = await user_manager.get_user_by_id(int(user_id))
+
+            if user is None:
+                # 尝试按 QQ ID 查
+                user = await user_manager.get_user_by_qq_id(str(user_id))
+
+            if user is None:
+                # 尝试按 Linyu ID 查
+                user = await user_manager.get_user_by_linyu_id(str(user_id))
+
+            if user is None and not str(user_id).isdigit():
+                # 非纯数字且非 UUID 格式，可能是 QQ 号首次接触，自动建档
+                # UUID 格式的 ID（如 Linyu fromId）不应走此路径
+                is_uuid = len(str(user_id)) == 36 and str(user_id).count("-") == 4
+                if not is_uuid:
                     try:
-                        created = await user_manager.get_or_create_user_by_qq_id(str(user_id))
-                        user_config = await user_manager.get_user_config_dict(created.id)
-                        user = created
+                        user = await user_manager.get_or_create_user_by_qq_id(str(user_id))
                     except Exception as e:
                         logger.warning(f"自动创建 QQ 用户失败 user_id={user_id}: {e}")
 
-                # Web 端常见：直接传 user.id（数字字符串）
-                if str(user_id).isdigit():
-                    user_by_id = await user_manager.get_user_by_id(int(user_id))
-                    if user_by_id:
-                        user_config = await user_manager.get_user_config_dict(user_by_id.id)
+            if user:
+                user_config = await user_manager.get_user_config_dict(user.id)
+                # 缓存 user_id -> username 映射（供提示词系统使用）
+                self._user_id_to_username[user_id] = user.username
         except Exception as e:
             logger.warning(f"获取用户配置失败: {e}")
 
@@ -199,6 +214,40 @@ class UserResourceCache:
         return manager
 
     def get_system_prompt(self, user_id: str) -> str:
-        """获取用户的系统提示词。"""
+        """获取用户的系统提示词。
+
+        优先级：
+        1. 提示词系统（user_data/{username}/system_prompt.md）
+        2. 用户配置中的 system_prompt（旧路径兼容）
+        3. 全局 config.yaml 中的 system_prompt
+        """
+        # 尝试通过提示词系统获取
+        username = self._resolve_username(user_id)
+        if username:
+            prompt = prompt_manager.get_prompt(username)
+            if prompt:
+                return prompt
+
+        # 回退到旧逻辑（用户配置 > 全局配置）
         user_config = self._user_configs.get(user_id, {})
         return config_merger.get_system_prompt(config.system_prompt, user_config.get('system_prompt'))
+
+    def _resolve_username(self, user_id: str) -> Optional[str]:
+        """从 user_id 解析出 username（用于提示词系统文件路径）。
+
+        user_id 可能是数字 ID 或 QQ 号，需要映射到 username。
+        优先使用 get_user_config 时缓存的映射。
+        """
+        if not user_id or user_id == "default":
+            return None
+
+        # 优先使用已缓存的映射（最准确）
+        if user_id in self._user_id_to_username:
+            return self._user_id_to_username[user_id]
+
+        # 如果 user_id 不是纯数字，可能本身就是 username
+        if not user_id.isdigit():
+            return user_id
+
+        # 纯数字时构造 qq_{user_id} 格式（与自动建档逻辑一致）
+        return f"qq_{user_id}"
