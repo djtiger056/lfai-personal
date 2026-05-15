@@ -279,11 +279,7 @@ class QQAdapter:
 
             if voice_only:
                 # 语音优先，失败则回退文本；文本中移除已播报部分
-                try:
-                    audio_data = await self.bot.synthesize_speech(response, user_id=user_id)
-                except Exception as e:
-                    print(f"❌ TTS合成失败: {str(e)}")
-                    audio_data = None
+                audio_data = await self._resolve_tts_audio(response, user_id)
 
                 text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
 
@@ -299,11 +295,7 @@ class QQAdapter:
                     asyncio.create_task(self._send_image_with_delay(user_id, last_image["image_data"], is_group=False))
             else:
                 # 先合成语音，再发送文本（移除已用于TTS的部分），最后发送语音
-                audio_data = None
-                try:
-                    audio_data = await self.bot.synthesize_speech(response, user_id=user_id)
-                except Exception as e:
-                    print(f"❌ TTS合成失败: {str(e)}")
+                audio_data = await self._resolve_tts_audio(response, user_id)
 
                 # 移除已用于TTS的文本
                 text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
@@ -312,7 +304,7 @@ class QQAdapter:
 
                 # 发送语音
                 if audio_data:
-                    print(f"🎵 语音合成成功，大小: {len(audio_data)} bytes，发送语音")
+                    print(f"🎵 发送语音消息")
                     await self.send_voice_message(user_id, audio_data)
 
                 # 延迟发送主动生成的图片（2秒后）
@@ -439,7 +431,7 @@ class QQAdapter:
 
             if voice_only:
                 try:
-                    audio_data = await self.bot.synthesize_speech(response, user_id=user_id)
+                    audio_data = await self._resolve_tts_audio(response, user_id)
                 except Exception as e:
                     print(f"❌ TTS合成失败: {str(e)}")
                     audio_data = None
@@ -457,11 +449,7 @@ class QQAdapter:
                     asyncio.create_task(self._send_image_with_delay(group_id, last_image["image_data"], is_group=True, group_id=group_id))
             else:
                 # 先合成语音，再发送文本（移除已用于TTS的部分），最后发送语音
-                audio_data = None
-                try:
-                    audio_data = await self.bot.synthesize_speech(response, user_id=user_id)
-                except Exception as e:
-                    print(f"❌ TTS合成失败: {str(e)}")
+                audio_data = await self._resolve_tts_audio(response, user_id)
 
                 # 移除已用于TTS的文本
                 text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
@@ -470,7 +458,7 @@ class QQAdapter:
 
                 # 发送语音
                 if audio_data:
-                    print(f"🎵 语音合成成功，大小: {len(audio_data)} bytes，发送语音")
+                    print(f"🎵 发送语音消息")
                     await self.send_voice_message(group_id, audio_data, is_group=True, group_id=group_id)
 
                 # 延迟发送主动生成的图片（2秒后）
@@ -1129,11 +1117,7 @@ class QQAdapter:
             )
              
             # 语音合成（如果有）
-            audio_data = None
-            try:
-                audio_data = await self.bot.synthesize_speech(llm_response, user_id=effective_user_id)
-            except Exception as e:
-                print(f"❌ TTS合成失败: {str(e)}")
+            audio_data = await self._resolve_tts_audio(llm_response, effective_user_id)
 
             # 移除已用于TTS的文本，避免重复发送
             text_to_send = self.bot.strip_tts_text(llm_response, user_id=effective_user_id)
@@ -1241,11 +1225,7 @@ class QQAdapter:
             )
 
             # 语音合成（如果有）
-            audio_data = None
-            try:
-                audio_data = await self.bot.synthesize_speech(llm_response, user_id=effective_user_id)
-            except Exception as e:
-                print(f"❌ TTS合成失败: {str(e)}")
+            audio_data = await self._resolve_tts_audio(llm_response, effective_user_id)
 
             # 移除已用于TTS的文本，避免重复发送
             text_to_send = self.bot.strip_tts_text(llm_response, user_id=effective_user_id)
@@ -1376,6 +1356,36 @@ class QQAdapter:
         except Exception as e:
             print(f"❌ 图片消息发送失败: {str(e)}")
     
+    async def _resolve_tts_audio(self, response: str, user_id: str) -> Optional[bytes]:
+        """统一 TTS 合成入口：优先 AI 主动触发，否则走概率触发。
+
+        Args:
+            response: Bot 返回的原始回复文本
+            user_id: 用户 ID
+
+        Returns:
+            音频数据，无语音时返回 None
+        """
+        forced = self.bot.get_last_tts_forced()
+        if forced and forced.get("text"):
+            try:
+                audio = await self.bot.synthesize_speech_forced(forced["text"], user_id=user_id)
+                if audio:
+                    print(f"🎵 语音合成成功（AI主动触发），大小: {len(audio)} bytes")
+                return audio
+            except Exception as e:
+                print(f"❌ TTS强制合成失败: {str(e)}")
+                return None
+        else:
+            try:
+                audio = await self.bot.synthesize_speech(response, user_id=user_id)
+                if audio:
+                    print(f"🎵 语音合成成功（概率触发），大小: {len(audio)} bytes")
+                return audio
+            except Exception as e:
+                print(f"❌ TTS合成失败: {str(e)}")
+                return None
+
     async def stop(self):
         """停止适配器"""
         self.running = False

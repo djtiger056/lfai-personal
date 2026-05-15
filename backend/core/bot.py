@@ -23,6 +23,7 @@ from ..user import user_manager
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now, from_isoformat
 from .gen_img_parser import extract_gen_img_prompt
+from .tts_tag_parser import extract_tts_tag
 from .context_builder import ContextBuilder
 from .history_manager import HistoryManager
 from .user_cache import UserResourceCache
@@ -58,6 +59,9 @@ class Bot:
 
         # 存储最近生成的图片（用于API返回）
         self._last_generated_image: Optional[Dict[str, Any]] = None
+
+        # 存储 AI 主动触发的 TTS 文本（用于API返回）
+        self._last_tts_forced_text: Optional[Dict[str, Any]] = None
         
         # 初始化TTS管理器
         self.tts_manager: Optional[TTSManager] = None
@@ -648,8 +652,20 @@ class Bot:
             if reminder_confirmation:
                 response = response + "\n\n" + reminder_confirmation
 
+            # 处理回复中的 TTS 标签 [TTS]...[/TTS]
+            cleaned_response, tts_forced_text = extract_tts_tag(response)
+            if tts_forced_text:
+                self._last_tts_forced_text = {
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "text": tts_forced_text,
+                }
+                print(f"[Bot] AI主动触发TTS: {tts_forced_text[:60]}...")
+            else:
+                self._last_tts_forced_text = None
+
             # 处理回复中的图片标签 [GEN_IMG: ...]
-            cleaned_response, image_data = await self._process_image_in_response(response, user_id, session_id)
+            cleaned_response, image_data = await self._process_image_in_response(cleaned_response, user_id, session_id)
 
             # 如果有图片生成，将图片数据存储到实例中供API调用
             if image_data:
@@ -739,6 +755,19 @@ class Bot:
                 full_response += chunk
                 yield chunk
             mark("llm_stream_done")
+
+            # 处理回复中的 TTS 标签 [TTS]...[/TTS]
+            cleaned_tts, tts_forced_text = extract_tts_tag(full_response)
+            if tts_forced_text:
+                self._last_tts_forced_text = {
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "text": tts_forced_text,
+                }
+                full_response = cleaned_tts
+                print(f"[Bot Stream] AI主动触发TTS: {tts_forced_text[:60]}...")
+            else:
+                self._last_tts_forced_text = None
 
             # 处理回复中的图片标签 [GEN_IMG: ...]
             cleaned_response, image_data = await self._process_image_in_response(full_response, user_id, session_id)
@@ -887,6 +916,47 @@ class Bot:
         except Exception as e:
             print(f"TTS合成失败: {str(e)}")
             return None
+
+    async def synthesize_speech_forced(self, text: str, voice: Optional[str] = None, user_id: str = "default") -> Optional[bytes]:
+        """强制合成语音（AI 主动触发，跳过概率判断）
+
+        Args:
+            text: 要合成的文本（已由 AI 通过 [TTS] 标签指定）
+            voice: 语音角色，可选
+            user_id: 用户 ID
+
+        Returns:
+            bytes: 音频数据，失败返回 None
+        """
+        await self._get_user_config(user_id)
+
+        tts_manager = self._get_user_tts_manager(user_id) or self.tts_manager
+        if not tts_manager:
+            return None
+
+        if not tts_manager.config.enabled:
+            return None
+
+        # 文本清洗但跳过概率判断
+        cleaned_text = tts_manager.text_cleaner.clean(text)
+        if not cleaned_text.strip():
+            return None
+
+        try:
+            return await tts_manager.synthesize(cleaned_text, voice)
+        except Exception as e:
+            print(f"TTS强制合成失败: {str(e)}")
+            return None
+
+    def get_last_tts_forced(self) -> Optional[Dict[str, Any]]:
+        """获取并清除 AI 主动触发的 TTS 文本信息
+
+        Returns:
+            包含 user_id, session_id, text 的字典，如果没有则返回 None
+        """
+        data = getattr(self, '_last_tts_forced_text', None)
+        self._last_tts_forced_text = None
+        return data
 
     def maybe_get_emote_payload(self, user_message: str, assistant_response: str) -> Optional[Dict[str, Any]]:
         """根据上下文与概率返回一张表情包（前端/适配器可用）"""

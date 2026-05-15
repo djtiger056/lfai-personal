@@ -133,7 +133,12 @@ class ContextBuilder:
         # 6. 为历史消息插入时间标记（第二层：让 LLM 看到对话中的时间流逝）
         self._inject_time_markers(enhanced_history)
 
-        # 7. 添加当前用户消息
+        # 7. 注入 TTS 语音能力提示（让 AI 知道自己可以主动发语音）
+        tts_hint = self._build_tts_capability_hint()
+        if tts_hint:
+            self._inject_system_content(enhanced_history, tts_hint)
+
+        # 8. 添加当前用户消息
         enhanced_history.append({
             "role": "user",
             "content": message,
@@ -248,6 +253,30 @@ class ContextBuilder:
             parts.append("短暂间隔，自然延续对话即可。")
 
         return "\n".join(parts)
+
+    # ---- TTS 语音能力提示 ----
+
+    def _build_tts_capability_hint(self) -> str:
+        """构建 TTS 语音能力提示。
+
+        如果主提示词中已包含语音协议说明，则不再重复注入。
+        仅在 TTS 启用且主提示词未提及时作为兜底。
+        """
+        bot = self._bot
+        tts_manager = getattr(bot, 'tts_manager', None)
+        if not tts_manager:
+            return ""
+        if not tts_manager.config.enabled:
+            return ""
+
+        # 检查系统提示词是否已包含 TTS 说明，避免重复
+        system_prompt = getattr(bot, 'system_prompt', "") or ""
+        if "[TTS]" in system_prompt or "语音协议" in system_prompt:
+            return ""
+
+        return (
+            "【语音能力】你可以用 [TTS]内容[/TTS] 发语音，适合撒娇、晚安等语气重要的短句，偶尔用即可。"
+        )
 
     # ---- 第二层：历史消息时间标记 ----
 
