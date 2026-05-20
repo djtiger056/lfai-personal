@@ -3,7 +3,7 @@ import {
   Card, Form, Input, Button, message, Tabs, Switch,
   InputNumber, Select, Spin, Alert, Divider, Row, Col, Tag, Space,
 } from 'antd';
-import { SaveOutlined, ReloadOutlined, GlobalOutlined } from '@ant-design/icons';
+import { SaveOutlined, ReloadOutlined, GlobalOutlined, FileTextOutlined, ToolOutlined } from '@ant-design/icons';
 import axios from 'axios';
 
 const { TextArea } = Input;
@@ -63,6 +63,9 @@ const AdminGlobalConfigPage: React.FC = () => {
       }
       if (formValues.system_prompt !== undefined) {
         payload.system_prompt = formValues.system_prompt;
+      }
+      if (formValues.system_rules !== undefined) {
+        payload.system_rules = formValues.system_rules;
       }
       if (formValues.adapters) {
         payload.adapters = deepMerge(rawConfig?.adapters ?? {}, formValues.adapters);
@@ -160,14 +163,63 @@ const AdminGlobalConfigPage: React.FC = () => {
               // ── 系统提示词 ────────────────────────────────────────
               {
                 key: 'prompt',
-                label: '系统提示词',
+                label: '提示词',
                 children: (
-                  <Form.Item name="system_prompt" label="默认系统提示词">
-                    <TextArea
-                      rows={15}
-                      placeholder="输入默认的系统提示词，用户未自定义时将使用此提示词"
-                    />
-                  </Form.Item>
+                  <Tabs
+                    defaultActiveKey="persona"
+                    size="small"
+                    items={[
+                      {
+                        key: 'persona',
+                        label: <span><FileTextOutlined /> 人设提示词</span>,
+                        children: (
+                          <>
+                            <Alert
+                              message="人设提示词（全局默认）"
+                              description="定义 AI 的角色、性格、世界观、语言风格和行为准则。用户未自定义时使用此默认值。"
+                              type="info"
+                              showIcon
+                              style={{ marginBottom: 16 }}
+                            />
+                            <Form.Item name="system_prompt" label="默认人设提示词">
+                              <TextArea
+                                rows={16}
+                                placeholder="输入默认的人设提示词，用户未自定义时将使用此提示词"
+                                style={{ fontFamily: 'monospace', fontSize: 13 }}
+                              />
+                            </Form.Item>
+                          </>
+                        ),
+                      },
+                      {
+                        key: 'rules',
+                        label: <span><ToolOutlined /> 功能协议</span>,
+                        children: (
+                          <>
+                            <Alert
+                              message="功能协议（全局默认）"
+                              description={
+                                <span>
+                                  定义 AI 可使用的功能指令，如图片发送 <code>[GEN_IMG:]</code>、语音 <code>[TTS]</code>、任务委派 <code>[DELEGATE:]</code> 等。
+                                  与人设分离，用户可独立覆盖。
+                                </span>
+                              }
+                              type="info"
+                              showIcon
+                              style={{ marginBottom: 16 }}
+                            />
+                            <Form.Item name="system_rules" label="默认功能协议">
+                              <TextArea
+                                rows={16}
+                                placeholder="输入默认的功能协议，留空则不注入任何功能协议"
+                                style={{ fontFamily: 'monospace', fontSize: 13 }}
+                              />
+                            </Form.Item>
+                          </>
+                        ),
+                      },
+                    ]}
+                  />
                 ),
               },
 
@@ -288,6 +340,36 @@ const AdminGlobalConfigPage: React.FC = () => {
                               <Col span={12}>
                                 <Form.Item name={['adapters', 'qq', 'segment_config', 'min_sentences_to_split']} label="最小句子数阈值">
                                   <InputNumber min={1} max={10} style={{ width: '100%' }} placeholder="2" />
+                                </Form.Item>
+                              </Col>
+                            </Row>
+
+                            <Divider orientation="left" plain>消息防抖（合并）</Divider>
+                            <Form.Item
+                              name={['adapters', 'qq', 'debounce', 'enabled']}
+                              label="启用消息防抖"
+                              valuePropName="checked"
+                              help="用户短时间内连续发送多条消息时，合并为一条后再回复，避免AI多次打断"
+                            >
+                              <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+                            </Form.Item>
+                            <Row gutter={16}>
+                              <Col span={12}>
+                                <Form.Item
+                                  name={['adapters', 'qq', 'debounce', 'delay']}
+                                  label="等待时间（秒）"
+                                  help="最后一条消息后等待多久再回复"
+                                >
+                                  <InputNumber min={1} max={30} step={0.5} style={{ width: '100%' }} placeholder="3.0" />
+                                </Form.Item>
+                              </Col>
+                              <Col span={12}>
+                                <Form.Item
+                                  name={['adapters', 'qq', 'debounce', 'max_wait']}
+                                  label="最大等待时间（秒）"
+                                  help="防止用户一直打字导致永远不回复"
+                                >
+                                  <InputNumber min={5} max={60} step={1} style={{ width: '100%' }} placeholder="15.0" />
                                 </Form.Item>
                               </Col>
                             </Row>
@@ -422,6 +504,36 @@ const AdminGlobalConfigPage: React.FC = () => {
                               <Col span={12}>
                                 <Form.Item name={['adapters', 'linyu', 'segment_config', 'min_sentences_to_split']} label="最小句子数阈值">
                                   <InputNumber min={1} max={10} style={{ width: '100%' }} placeholder="2" />
+                                </Form.Item>
+                              </Col>
+                            </Row>
+
+                            <Divider orientation="left" plain>消息防抖（合并）</Divider>
+                            <Form.Item
+                              name={['adapters', 'linyu', 'debounce', 'enabled']}
+                              label="启用消息防抖"
+                              valuePropName="checked"
+                              help="用户短时间内连续发送多条消息时，合并为一条后再回复，避免AI多次打断"
+                            >
+                              <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+                            </Form.Item>
+                            <Row gutter={16}>
+                              <Col span={12}>
+                                <Form.Item
+                                  name={['adapters', 'linyu', 'debounce', 'delay']}
+                                  label="等待时间（秒）"
+                                  help="最后一条消息后等待多久再回复"
+                                >
+                                  <InputNumber min={1} max={30} step={0.5} style={{ width: '100%' }} placeholder="3.0" />
+                                </Form.Item>
+                              </Col>
+                              <Col span={12}>
+                                <Form.Item
+                                  name={['adapters', 'linyu', 'debounce', 'max_wait']}
+                                  label="最大等待时间（秒）"
+                                  help="防止用户一直打字导致永远不回复"
+                                >
+                                  <InputNumber min={5} max={60} step={1} style={{ width: '100%' }} placeholder="15.0" />
                                 </Form.Item>
                               </Col>
                             </Row>

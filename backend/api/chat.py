@@ -42,24 +42,40 @@ async def chat(request: ChatRequest):
             image_base64 = base64.b64encode(last_image["image_data"]).decode('utf-8')
             print(f"[Chat API] 返回生成的图片，大小: {len(last_image['image_data'])} bytes")
 
-        # 尝试合成语音
+        # 尝试合成语音（优先 AI 主动触发，否则走概率）
         try:
-            audio_data = await bot.synthesize_speech(response, user_id=request.user_id)
+            forced_tts = bot.get_last_tts_forced()
+            audio_data = None
             audio_base64 = None
             audio_mime = None
             voice_only = bot.is_voice_only_mode(request.user_id)
             text_to_send = response
 
-            if audio_data:
-                import base64
-                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                audio_mime = _detect_audio_mime(audio_data)
-                print(f"TTS音频生成成功，大小: {len(audio_data)} bytes")
-                if voice_only:
-                    text_to_send = bot.strip_tts_text(response, request.user_id)
+            if forced_tts and forced_tts.get("text"):
+                # AI 主动触发 TTS
+                audio_data = await bot.synthesize_speech_forced(
+                    forced_tts["text"], user_id=request.user_id
+                )
+                if audio_data:
+                    import base64
+                    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                    audio_mime = _detect_audio_mime(audio_data)
+                    print(f"TTS音频生成成功（AI主动触发），大小: {len(audio_data)} bytes")
+                    if voice_only:
+                        text_to_send = bot.strip_tts_text(response, request.user_id)
             else:
-                print("TTS未生成音频（可能被概率或配置阻止）")
-                text_to_send = response
+                # 概率触发 TTS
+                audio_data = await bot.synthesize_speech(response, user_id=request.user_id)
+                if audio_data:
+                    import base64
+                    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                    audio_mime = _detect_audio_mime(audio_data)
+                    print(f"TTS音频生成成功，大小: {len(audio_data)} bytes")
+                    if voice_only:
+                        text_to_send = bot.strip_tts_text(response, request.user_id)
+                else:
+                    print("TTS未生成音频（可能被概率或配置阻止）")
+                    text_to_send = response
         except Exception as e:
             print(f"TTS生成失败: {str(e)}")
             audio_base64 = None
@@ -133,16 +149,27 @@ async def chat_stream(request: ChatRequest):
                 print(f"[Chat Stream API] 返回生成的图片，大小: {len(last_image['image_data'])} bytes")
                 yield f"data: {json.dumps({'image': image_base64})}\n\n"
 
-            # 完成文本输出后，尝试合成语音
+            # 完成文本输出后，尝试合成语音（优先 AI 主动触发）
             try:
-                audio_data = await bot.synthesize_speech(full_response, user_id=request.user_id)
-                if audio_data:
-                    import base64
-                    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                    print(f"流式TTS音频生成成功，大小: {len(audio_data)} bytes")
-                    yield f"data: {json.dumps({'audio': audio_base64, 'audio_mime': _detect_audio_mime(audio_data), 'voice_only': bot.is_voice_only_mode(request.user_id)})}\n\n"
+                forced_tts = bot.get_last_tts_forced()
+                if forced_tts and forced_tts.get("text"):
+                    audio_data = await bot.synthesize_speech_forced(
+                        forced_tts["text"], user_id=request.user_id
+                    )
+                    if audio_data:
+                        import base64
+                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                        print(f"流式TTS音频生成成功（AI主动触发），大小: {len(audio_data)} bytes")
+                        yield f"data: {json.dumps({'audio': audio_base64, 'audio_mime': _detect_audio_mime(audio_data), 'voice_only': bot.is_voice_only_mode(request.user_id)})}\n\n"
                 else:
-                    print("流式TTS未生成音频")
+                    audio_data = await bot.synthesize_speech(full_response, user_id=request.user_id)
+                    if audio_data:
+                        import base64
+                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                        print(f"流式TTS音频生成成功，大小: {len(audio_data)} bytes")
+                        yield f"data: {json.dumps({'audio': audio_base64, 'audio_mime': _detect_audio_mime(audio_data), 'voice_only': bot.is_voice_only_mode(request.user_id)})}\n\n"
+                    else:
+                        print("流式TTS未生成音频")
             except Exception as e:
                 print(f"流式TTS生成失败: {str(e)}")
 
