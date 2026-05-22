@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from typing import Optional
 from ..core.bot import Bot
 
@@ -9,9 +10,22 @@ class ConsoleAdapter:
     def __init__(self, bot: Bot):
         self.bot = bot
         self.running = False
+
+    def _has_interactive_stdin(self) -> bool:
+        """Return True only when input() can wait for a real console user."""
+        stdin = getattr(sys, "stdin", None)
+        try:
+            return bool(stdin and stdin.isatty())
+        except Exception:
+            return False
     
     async def start(self):
         """启动控制台交互"""
+        if not self._has_interactive_stdin():
+            print("ℹ️ 当前没有交互式输入流，控制台适配器跳过启动")
+            self.running = False
+            return
+
         self.running = True
         print("=" * 50)
         print("🤖 LFBot 控制台模式")

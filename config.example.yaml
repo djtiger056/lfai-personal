@@ -188,6 +188,35 @@ image_generation:
   # 默认兜底底图路径（当用户未上传底图时使用）
   default_base_image_path: "backend/data/default_base_image.jpg"
 
+video_generation:
+  enabled: false
+  provider: video_api
+  video_api:
+    api_base: "http://127.0.0.1:18080"
+    api_key: ""
+    provider: qwen
+    model: wan2.7-t2v
+    timeout: 600
+    ratio: "16:9"
+    resolution: "1080P"
+    duration: 5
+    use_async: false
+    poll_interval: 4
+  trigger_keywords:
+    - 生成视频
+    - 做个视频
+    - 做一段视频
+    - 视频生成
+    - 文生视频
+  prompt_instruction: |
+    用户刚刚明确提出了视频生成需求。你可以把用户需求整理成一段适合视频生成模型的中文提示词。
+    如果确实要生成视频，只输出自然回复，并在末尾附加一段 [GEN_VIDEO: 提示词]。
+    提示词应包含主体、动作、场景、镜头、风格、光线和时长感。
+    不要在用户没有主动要求生成视频时使用 [GEN_VIDEO:]。
+  generating_message: "🎬 正在为你生成视频，请稍候..."
+  error_message: "😢 视频生成失败：{error}"
+  success_message: "✨ 视频已生成完成！"
+
 vision:
   enabled: false
   provider: modelscope

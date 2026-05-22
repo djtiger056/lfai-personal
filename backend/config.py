@@ -88,6 +88,13 @@ class Config:
         from backend.image_gen.config import ImageGenerationConfig
         image_gen_dict = self._config.get('image_generation', {})
         return ImageGenerationConfig(**image_gen_dict)
+
+    @property
+    def video_gen_config(self):
+        """获取视频生成配置"""
+        from backend.video_gen.config import VideoGenerationConfig
+        video_gen_dict = self._config.get('video_generation', {})
+        return VideoGenerationConfig(**video_gen_dict)
     
     @property
     def vision_config(self):

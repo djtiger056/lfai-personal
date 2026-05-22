@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from backend.user import user_manager, auth_manager
 from backend.api.deps import get_access_token
+from backend.api.bot_provider import get_bot
 from backend.adapters.linyu_manager import get_linyu_session_manager
 
 
@@ -16,6 +17,7 @@ class UserConfigResponse(BaseModel):
     llm: Optional[Dict[str, Any]] = None
     tts: Optional[Dict[str, Any]] = None
     image_generation: Optional[Dict[str, Any]] = None
+    video_generation: Optional[Dict[str, Any]] = None
     vision: Optional[Dict[str, Any]] = None
     prompt_enhancer: Optional[Dict[str, Any]] = None
     emotes: Optional[Dict[str, Any]] = None
@@ -29,6 +31,7 @@ class UpdateUserConfigRequest(BaseModel):
     llm: Optional[Dict[str, Any]] = Field(default=None, description="LLM配置")
     tts: Optional[Dict[str, Any]] = Field(default=None, description="TTS配置")
     image_generation: Optional[Dict[str, Any]] = Field(default=None, description="图像生成配置")
+    video_generation: Optional[Dict[str, Any]] = Field(default=None, description="视频生成配置")
     vision: Optional[Dict[str, Any]] = Field(default=None, description="视觉识别配置")
     prompt_enhancer: Optional[Dict[str, Any]] = Field(default=None, description="提示词增强配置")
     emotes: Optional[Dict[str, Any]] = Field(default=None, description="表情包配置")
@@ -77,6 +80,8 @@ async def update_user_config(request: UpdateUserConfigRequest, token: str = Depe
         config_data['tts_config'] = request.tts
     if request.image_generation is not None:
         config_data['image_gen_config'] = request.image_generation
+    if request.video_generation is not None:
+        config_data['video_gen_config'] = request.video_generation
     if request.vision is not None:
         config_data['vision_config'] = request.vision
     if request.prompt_enhancer is not None:
@@ -98,6 +103,7 @@ async def update_user_config(request: UpdateUserConfigRequest, token: str = Depe
         )
     
     # 返回更新后的配置
+    get_bot().invalidate_user_cache(str(user_info['user_id']))
     config_dict = await user_manager.get_user_config_dict(user_info['user_id'])
     manager = get_linyu_session_manager()
     if manager:
@@ -132,7 +138,7 @@ async def reset_user_config(token: str = Depends(get_access_token), config_type:
     if config_type:
         # 重置指定类型的配置
         valid_types = [
-            'system_prompt', 'llm', 'tts', 'image_generation',
+            'system_prompt', 'llm', 'tts', 'image_generation', 'video_generation',
             'vision', 'prompt_enhancer', 'emotes', 'adapters', 'preferences'
         ]
         
@@ -150,6 +156,8 @@ async def reset_user_config(token: str = Depends(get_access_token), config_type:
             config_data['tts_config'] = None
         elif config_type == 'image_generation':
             config_data['image_gen_config'] = None
+        elif config_type == 'video_generation':
+            config_data['video_gen_config'] = None
         elif config_type == 'vision':
             config_data['vision_config'] = None
         elif config_type == 'prompt_enhancer':
@@ -167,6 +175,7 @@ async def reset_user_config(token: str = Depends(get_access_token), config_type:
             'llm_config': None,
             'tts_config': None,
             'image_gen_config': None,
+            'video_gen_config': None,
             'vision_config': None,
             'prompt_enhancer_config': None,
             'emote_config': None,
@@ -183,6 +192,7 @@ async def reset_user_config(token: str = Depends(get_access_token), config_type:
             detail="配置重置失败"
         )
 
+    get_bot().invalidate_user_cache(str(user_info['user_id']))
     manager = get_linyu_session_manager()
     if manager:
         manager.request_refresh_user(str(user_info['user_id']))

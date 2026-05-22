@@ -18,7 +18,7 @@ function isCurrentUserAdmin(): boolean {
     const userStr = localStorage.getItem('user')
     if (userStr) {
       const user = JSON.parse(userStr)
-      return user.is_admin === 1
+      return user.is_admin === 1 || user.is_admin === true || user.is_admin === '1'
     }
   } catch (e) {
     // ignore
@@ -114,6 +114,34 @@ export const imageGenConfigProxy = {
       return response.data
     } else {
       await userConfigApi.updateConfig({ image_generation: config })
+    }
+  },
+}
+
+/**
+ * 配置代理 - 视频生成
+ */
+export const videoGenConfigProxy = {
+  getConfig: async () => {
+    if (isCurrentUserAdmin()) {
+      const response = await api.get('/video-gen/config')
+      return response.data.data
+    } else {
+      const userConfig = await userConfigApi.getConfig()
+      if (userConfig.video_generation && Object.keys(userConfig.video_generation).length > 0) {
+        return userConfig.video_generation
+      }
+      const response = await api.get('/video-gen/config')
+      return response.data.data
+    }
+  },
+
+  updateConfig: async (config: any) => {
+    if (isCurrentUserAdmin()) {
+      const response = await api.post('/video-gen/config', config)
+      return response.data
+    } else {
+      await userConfigApi.updateConfig({ video_generation: config })
     }
   },
 }

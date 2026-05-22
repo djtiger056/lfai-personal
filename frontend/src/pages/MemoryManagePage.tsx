@@ -11,7 +11,8 @@ import {
   Popconfirm,
   Tag,
   Tooltip,
-  Select
+  Select,
+  InputNumber
 } from 'antd'
 import { 
   EditOutlined, 

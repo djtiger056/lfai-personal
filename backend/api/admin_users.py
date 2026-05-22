@@ -53,6 +53,7 @@ class AdminUpdateUserConfigRequest(BaseModel):
     llm: Optional[Dict[str, Any]] = None
     tts: Optional[Dict[str, Any]] = None
     image_generation: Optional[Dict[str, Any]] = None
+    video_generation: Optional[Dict[str, Any]] = None
     vision: Optional[Dict[str, Any]] = None
     prompt_enhancer: Optional[Dict[str, Any]] = None
     emotes: Optional[Dict[str, Any]] = None
@@ -66,6 +67,7 @@ def _build_global_config() -> Dict[str, Any]:
         "llm": global_config.llm_config,
         "tts": global_config.tts_config,
         "image_generation": global_config.image_gen_config.dict() if hasattr(global_config.image_gen_config, "dict") else {},
+        "video_generation": global_config.video_gen_config.dict() if hasattr(global_config.video_gen_config, "dict") else {},
         "vision": global_config.vision_config.dict() if hasattr(global_config.vision_config, "dict") else {},
         "emotes": global_config.emote_config.dict() if hasattr(global_config.emote_config, "dict") else {},
         "prompt_enhancer": global_config.prompt_enhancer_config.dict() if hasattr(global_config.prompt_enhancer_config, "dict") else {},
@@ -166,6 +168,8 @@ async def update_user_config(user_key: str, request: AdminUpdateUserConfigReques
         config_data["tts_config"] = request.tts
     if request.image_generation is not None:
         config_data["image_gen_config"] = request.image_generation
+    if request.video_generation is not None:
+        config_data["video_gen_config"] = request.video_generation
     if request.vision is not None:
         config_data["vision_config"] = request.vision
     if request.prompt_enhancer is not None:

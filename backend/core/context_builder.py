@@ -147,19 +147,24 @@ class ContextBuilder:
             if memory_context:
                 self._append_to_persona_system(enhanced_history, memory_context)
 
+        # 6. 仅当当前用户消息主动命中视频生成意图时，临时注入视频生成协议。
+        video_generation_hint = self._bot._build_video_generation_hint(user_id, session_id, message)
+        if video_generation_hint:
+            self._append_to_persona_system(enhanced_history, video_generation_hint)
+
         # ── 功能协议层：作为独立的第二条 system 消息插入历史之前 ──────────────
 
-        # 6. 注入功能协议（视觉/语音/委派协议，与人设分离）
+        # 7. 注入功能协议（视觉/语音/委派协议，与人设分离）
         self._inject_rules_system(enhanced_history, user_id)
 
         # ── 历史消息处理 ────────────────────────────────────────────────────
 
-        # 7. 为历史消息插入时间标记（让 LLM 看到对话中的时间流逝）
+        # 8. 为历史消息插入时间标记（让 LLM 看到对话中的时间流逝）
         self._inject_time_markers(enhanced_history)
 
         # ── 当前消息 ─────────────────────────────────────────────────────────
 
-        # 8. 添加当前用户消息（紧接历史消息，保持对话连续性）
+        # 9. 添加当前用户消息（紧接历史消息，保持对话连续性）
         enhanced_history.append({
             "role": "user",
             "content": message,
