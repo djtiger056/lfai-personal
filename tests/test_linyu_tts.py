@@ -9,10 +9,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.adapters.linyu import LinyuAdapter
 
 
+def _init_minimal_adapter_state(adapter: LinyuAdapter) -> None:
+    adapter.owner_user_id = None
+    adapter.companion_id = ""
+    adapter.ai_account_id = ""
+    adapter._bound_bot_user_ids = {}
+    adapter.segment_enabled = False
+    adapter.delay_range = [0.0, 0.0]
+
+
 @pytest.mark.asyncio
 async def test_linyu_stream_filters_tts_tags_and_preserves_content():
     adapter = LinyuAdapter.__new__(LinyuAdapter)
     sent_messages = []
+    _init_minimal_adapter_state(adapter)
 
     class FakeBot:
         def register_session_channel(self, session_id, channel):
@@ -23,8 +33,6 @@ async def test_linyu_stream_filters_tts_tags_and_preserves_content():
                 yield chunk
 
     adapter.bot = FakeBot()
-    adapter.segment_enabled = False
-    adapter.delay_range = [0.0, 0.0]
     adapter._send_text_once = AsyncMock(
         side_effect=lambda target_id, message, is_group=False: sent_messages.append(message)
     )
@@ -36,8 +44,40 @@ async def test_linyu_stream_filters_tts_tags_and_preserves_content():
 
 
 @pytest.mark.asyncio
+async def test_linyu_stream_filters_im_actions_blocks_from_visible_text():
+    adapter = LinyuAdapter.__new__(LinyuAdapter)
+    sent_messages = []
+    _init_minimal_adapter_state(adapter)
+
+    class FakeBot:
+        def register_session_channel(self, session_id, channel):
+            return None
+
+        async def chat_stream(self, prompt, user_id="default", session_id=None):
+            for chunk in (
+                "我知道啦。",
+                "[IM_ACT",
+                "IONS]{\"actions\":[{\"name\":\"moment.create\",\"params\":{\"text\":\"晚安\"}}]}[/IM_ACTIONS]",
+                "晚点和你说。",
+            ):
+                yield chunk
+
+    adapter.bot = FakeBot()
+    adapter._send_text_once = AsyncMock(
+        side_effect=lambda target_id, message, is_group=False: sent_messages.append(message)
+    )
+
+    response = await adapter._stream_reply_by_sentence("user-1", "hello", session_id="session-1")
+
+    assert "[IM_ACTIONS]" not in response
+    assert response == "我知道啦。晚点和你说。"
+    assert sent_messages == ["我知道啦。", "晚点和你说。"]
+
+
+@pytest.mark.asyncio
 async def test_linyu_resolve_tts_audio_prefers_forced_tts():
     adapter = LinyuAdapter.__new__(LinyuAdapter)
+    _init_minimal_adapter_state(adapter)
     adapter.bot = type(
         "FakeBot",
         (),
@@ -58,6 +98,7 @@ async def test_linyu_resolve_tts_audio_prefers_forced_tts():
 @pytest.mark.asyncio
 async def test_linyu_voice_only_mode_sends_voice_without_duplicate_text():
     adapter = LinyuAdapter.__new__(LinyuAdapter)
+    _init_minimal_adapter_state(adapter)
     adapter.bot = type(
         "FakeBot",
         (),
@@ -79,6 +120,7 @@ async def test_linyu_voice_only_mode_sends_voice_without_duplicate_text():
 @pytest.mark.asyncio
 async def test_linyu_voice_only_mode_falls_back_to_text_when_tts_missing():
     adapter = LinyuAdapter.__new__(LinyuAdapter)
+    _init_minimal_adapter_state(adapter)
     adapter.bot = type(
         "FakeBot",
         (),
@@ -100,6 +142,7 @@ async def test_linyu_voice_only_mode_falls_back_to_text_when_tts_missing():
 @pytest.mark.asyncio
 async def test_linyu_text_reply_uses_owner_user_config_for_voice_only():
     adapter = LinyuAdapter.__new__(LinyuAdapter)
+    _init_minimal_adapter_state(adapter)
     adapter.owner_user_id = "owner-42"
     adapter.bot = type(
         "FakeBot",
@@ -107,6 +150,8 @@ async def test_linyu_text_reply_uses_owner_user_config_for_voice_only():
         {
             "is_voice_only_mode": lambda self, user_id="default": user_id == "owner-42",
             "get_last_generated_image": lambda self: None,
+            "get_last_generated_video": lambda self: None,
+            "pop_last_mode_command": lambda self, user_id=None, session_id=None: None,
         },
     )()
     adapter._stream_reply_by_sentence = AsyncMock(return_value="回复文本")

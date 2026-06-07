@@ -69,6 +69,7 @@ from backend.api.daily_schedule import router as daily_schedule_router
 from backend.api.prompt import router as prompt_router
 from backend.api.agent_delegate import router as agent_delegate_router
 from backend.api.linyu_sessions import router as linyu_sessions_router
+from backend.api.companion_actions import router as companion_actions_router
 
 # 创建 FastAPI 应用
 app = FastAPI(title="LFBot API", version="1.0.0")
@@ -124,6 +125,7 @@ app.include_router(daily_schedule_router)
 app.include_router(prompt_router)
 app.include_router(agent_delegate_router)
 app.include_router(linyu_sessions_router)
+app.include_router(companion_actions_router)
 
 
 @app.get("/api/health")

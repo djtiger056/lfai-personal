@@ -107,6 +107,39 @@ export type LinyuAIAccount = {
   }>
 }
 
+export type CompanionActionConfig = {
+  enabled: boolean
+  autonomy_mode: 'auto'
+  target_scope: 'bound_and_friends'
+  allow_actions: string[]
+  rate_limits: {
+    max_actions_per_plan: number
+    max_actions_per_hour: number
+    max_actions_per_day: number
+    max_proactive_messages_per_friend_per_hour: number
+  }
+}
+
+export type CompanionActionCatalogItem = {
+  name: string
+  risk: string
+  description: string
+}
+
+export type CompanionActionLog = {
+  id: number
+  companion_id: string
+  source: string
+  session_id: string
+  action_name: string
+  target_key: string
+  status: string
+  error_message: string
+  params: Record<string, any>
+  result: Record<string, any>
+  created_at: string
+}
+
 export const accountsApi = {
   listAccounts: async (params?: { platform?: 'qq' | 'linyu'; enabled?: boolean }): Promise<ExternalAccount[]> => {
     const response = await api.get('/accounts', { params })
@@ -164,6 +197,22 @@ export const accountsApi = {
   },
   deleteLinyuAIAccount: async (id: number): Promise<void> => {
     await api.delete(`/ai-accounts/linyu/${id}`)
+  },
+  getCompanionActionsCatalog: async (): Promise<CompanionActionCatalogItem[]> => {
+    const response = await api.get('/companion-actions/catalog')
+    return Array.isArray(response.data?.catalog) ? response.data.catalog : []
+  },
+  getCompanionActionsConfig: async (companionId: string): Promise<CompanionActionConfig> => {
+    const response = await api.get('/companion-actions/config', { params: { companion_id: companionId } })
+    return response.data?.config
+  },
+  updateCompanionActionsConfig: async (companionId: string, data: Partial<CompanionActionConfig>): Promise<CompanionActionConfig> => {
+    const response = await api.put('/companion-actions/config', data, { params: { companion_id: companionId } })
+    return response.data?.config
+  },
+  listCompanionActionLogs: async (companionId: string, limit = 100): Promise<CompanionActionLog[]> => {
+    const response = await api.get('/companion-actions/logs', { params: { companion_id: companionId, limit } })
+    return Array.isArray(response.data?.logs) ? response.data.logs : []
   },
 }
 

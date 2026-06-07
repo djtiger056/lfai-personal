@@ -11,7 +11,7 @@ import traceback
 import wave
 from urllib.parse import urlparse
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
 import aiohttp
 import websockets
@@ -22,6 +22,7 @@ from ..core.bot import Bot
 from ..config import config
 from ..api import proactive as proactive_api
 from ..agent_delegate import extract_delegate_tag
+from ..im_actions import extract_im_actions_block
 from ..core.gen_img_parser import extract_gen_img_prompt
 from ..core.gen_video_parser import extract_gen_video_prompt
 from ..core.tts_tag_parser import extract_tts_tag
@@ -134,6 +135,7 @@ class LinyuAdapter:
         self.follow_up_waiters: Dict[str, asyncio.Future] = {}
         self._bound_bot_user_ids: Dict[str, str] = {}
         self._emote_send_cache: Dict[str, Dict[str, float]] = {}
+        self._message_tasks: Set[asyncio.Task] = set()
         # 消息去重缓存
         self._processed_messages: Dict[str, float] = {}
         self._message_dedup_ttl = 60.0
@@ -225,6 +227,8 @@ class LinyuAdapter:
             await self.voice_call_manager.shutdown()
         except Exception:
             pass
+        for task in list(self._message_tasks):
+            task.cancel()
         await self._close_websocket()
         await self._close_http_session()
         print("🔌 Linyu 适配器已停止")
@@ -316,7 +320,7 @@ class LinyuAdapter:
                 if not data:
                     continue
 
-                await self._process_ws_message(data)
+                self._spawn_message_task(self._process_ws_message(data), "ws_message")
 
             except websockets.exceptions.ConnectionClosed as e:
                 print(f"🔌 Linyu 连接已断开: {e.code if e.code else '未知'} - {e.reason if e.reason else '未知原因'}")
@@ -328,6 +332,25 @@ class LinyuAdapter:
                 print(f"❌ 消息处理错误: {type(e).__name__}: {str(e)}")
                 continue
         print("🔄 消息处理循环结束，准备重连...")
+
+    def _spawn_message_task(self, coro: Any, label: str) -> None:
+        """将消息处理放入后台任务，避免阻塞 WebSocket 接收循环。"""
+        task = asyncio.create_task(coro)
+        self._message_tasks.add(task)
+
+        def _cleanup(done_task: asyncio.Task) -> None:
+            self._message_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                print(f"❌ 后台消息任务状态读取失败 ({label}): {type(error).__name__}: {str(error)}")
+                return
+            if exc:
+                print(f"❌ 后台消息任务异常 ({label}): {type(exc).__name__}: {str(exc)}")
+
+        task.add_done_callback(_cleanup)
 
     async def _process_ws_message(self, data: Dict[str, Any]):
         msg_type = data.get("type")
@@ -840,30 +863,50 @@ class LinyuAdapter:
             return "", ""
 
         lower = pending.lower()
-        # 需要过滤的标签前缀列表
-        filter_tokens = ["[gen_img:", "[gen_video:", "[delegate:"]
+        simple_tokens = ["[gen_img:", "[gen_video:", "[delegate:"]
+        block_tokens = {
+            "[tts]": ("[/tts]", True),
+            "[im_actions]": ("[/im_actions]", False),
+        }
         cursor = 0
         visible_parts: list[str] = []
 
         while True:
-            # 找到最近的一个标签起始位置
-            earliest_start = -1
-            for token in filter_tokens:
+            candidates: list[tuple[int, str, str]] = []
+            for token in simple_tokens:
                 start = lower.find(token, cursor)
-                if start >= 0 and (earliest_start < 0 or start < earliest_start):
-                    earliest_start = start
+                if start >= 0:
+                    candidates.append((start, token, "simple"))
+            for token in block_tokens:
+                start = lower.find(token, cursor)
+                if start >= 0:
+                    candidates.append((start, token, "block"))
 
-            if earliest_start < 0:
+            if not candidates:
                 tail = pending[cursor:]
-                visible_tail, remainder = self._split_incomplete_tag_prefix(tail, filter_tokens)
+                visible_tail, remainder = self._split_incomplete_tag_prefix(
+                    tail,
+                    simple_tokens + list(block_tokens.keys()) + [item[0] for item in block_tokens.values()],
+                )
                 visible_parts.append(visible_tail)
                 return "".join(visible_parts), remainder
 
+            earliest_start, token, token_kind = min(candidates, key=lambda item: item[0])
             visible_parts.append(pending[cursor:earliest_start])
+
+            if token_kind == "block":
+                end_token, keep_inner_text = block_tokens[token]
+                end_start = lower.find(end_token, earliest_start + len(token))
+                if end_start < 0:
+                    return "".join(visible_parts), pending[earliest_start:]
+                if keep_inner_text:
+                    visible_parts.append(pending[earliest_start + len(token):end_start])
+                cursor = end_start + len(end_token)
+                continue
+
             end = pending.find("]", earliest_start)
             if end < 0:
                 return "".join(visible_parts), pending[earliest_start:]
-
             cursor = end + 1
 
     async def _stream_reply_by_sentence(
@@ -962,6 +1005,7 @@ class LinyuAdapter:
         cleaned_response, _ = extract_gen_img_prompt(cleaned_response)
         cleaned_response, _ = extract_gen_video_prompt(cleaned_response)
         cleaned_response, _ = extract_delegate_tag(cleaned_response)
+        cleaned_response, _ = extract_im_actions_block(cleaned_response)
 
         if sender_error:
             if sent_sentence_count <= 0:
@@ -991,6 +1035,7 @@ class LinyuAdapter:
         cleaned_response, _ = extract_gen_img_prompt(cleaned_response)
         cleaned_response, _ = extract_gen_video_prompt(cleaned_response)
         cleaned_response, _ = extract_delegate_tag(cleaned_response)
+        cleaned_response, _ = extract_im_actions_block(cleaned_response)
         return cleaned_response
 
     async def _deliver_tts_and_text_response(
@@ -1028,7 +1073,7 @@ class LinyuAdapter:
         owner_user_id = str(getattr(self, "owner_user_id", "") or "").strip()
         if owner_user_id and owner_user_id != "global":
             return owner_user_id
-        bound_user_id = self._bound_bot_user_ids.get(str(linyu_user_id))
+        bound_user_id = getattr(self, "_bound_bot_user_ids", {}).get(str(linyu_user_id))
         return bound_user_id or str(linyu_user_id)
 
     def _get_bot_session_id(self, linyu_user_id: str) -> str:

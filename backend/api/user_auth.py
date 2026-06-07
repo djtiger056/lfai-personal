@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
+from backend.user import auth_manager, user_manager
 from backend.config import config
 from backend.personal_auth import (
     create_personal_token,
@@ -30,6 +31,60 @@ class AuthSettingsRequest(BaseModel):
     enabled: Optional[bool] = None
     username: Optional[str] = None
     password: Optional[str] = None
+
+
+async def _resolve_linyu_user_id(linyu_user_id: str) -> Optional[str]:
+    """兼容旧绑定接口：账号名解析为 Linyu UUID。"""
+    from fastapi import HTTPException
+    from backend.api.accounts import _resolve_linyu_user_account
+
+    token = str(linyu_user_id or "").strip()
+    if not token:
+        return None
+    if len(token) == 36 and token.count("-") == 4:
+        return token
+    try:
+        resolved = await _resolve_linyu_user_account(token)
+    except HTTPException:
+        return None
+    return str(resolved.get("remote_user_id") or "").strip() or None
+
+
+async def bind_linyu_account(*, token: str, linyu_user_id: str) -> Dict[str, Any]:
+    """兼容旧测试/旧调用路径的 Linyu 绑定函数。"""
+    from fastapi import HTTPException
+
+    auth_user = auth_manager.get_user_from_token(token)
+    if not auth_user or not auth_user.get("user_id"):
+        raise HTTPException(status_code=401, detail="认证失效")
+
+    user_id = int(auth_user["user_id"])
+    user = await user_manager.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    raw_account = str(linyu_user_id or "").strip()
+    resolved_user_id = await _resolve_linyu_user_id(raw_account)
+    if not resolved_user_id:
+        raise HTTPException(status_code=400, detail="未能解析 Linyu 账号")
+
+    existing = await user_manager.get_user_by_linyu_id(resolved_user_id)
+    if existing and int(getattr(existing, "id", 0) or 0) != user_id:
+        raise HTTPException(status_code=400, detail="该 Linyu 账号已被其他用户绑定")
+
+    updated = await user_manager.update_user(
+        user_id=user_id,
+        linyu_user_id=resolved_user_id,
+        linyu_account=raw_account,
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="绑定 Linyu 账号失败")
+
+    return {
+        "user_id": user_id,
+        "linyu_user_id": resolved_user_id,
+        "linyu_account": raw_account,
+    }
 
 
 @router.get("/auth/status")

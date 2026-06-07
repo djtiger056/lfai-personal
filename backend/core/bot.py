@@ -21,6 +21,7 @@ from ..mcp import MCPManager
 from ..emote import EmoteManager, EmoteConfig
 from ..agent_delegate import AgentDelegator, extract_delegate_tag
 from ..agent_delegate.config import AgentDelegateConfig
+from ..im_actions import CompanionActionManager, extract_im_actions_block
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now, from_isoformat
 from ..utils.companion_identity import normalize_companion_memory_scope
@@ -63,6 +64,7 @@ class Bot:
         # 向后兼容：让旧引用指向 HistoryManager 内部存储
         self.session_histories = self._history_manager.session_histories
         self._history_loaded_sessions = self._history_manager._history_loaded_sessions
+        self._background_tasks: Set[asyncio.Task] = set()
         self.mcp_manager = MCPManager()
 
         # 用户资源缓存（配置、Provider、TTS、ImageGen 实例）
@@ -172,6 +174,7 @@ class Bot:
         self.agent_delegator: Optional[AgentDelegator] = None
         # session/user -> channel 映射，由 adapter 注册
         self._session_channel_map: Dict[str, str] = {}
+        self.companion_action_manager = CompanionActionManager(self)
         try:
             delegate_config = config.agent_delegate_config
             if delegate_config.enabled:
@@ -633,6 +636,24 @@ class Bot:
             await self.memory_manager.add_short_term_memory(memory_user_id, memory_session_id, assistant_msg)
         except Exception as e:
             print(f"添加对话到记忆失败: {e}")
+
+    def _track_background_task(self, task: asyncio.Task, *, label: str = "background") -> None:
+        """跟踪后台任务，避免被过早回收，并记录异常。"""
+        self._background_tasks.add(task)
+
+        def _cleanup(done_task: asyncio.Task) -> None:
+            self._background_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            except Exception as error:
+                print(f"[Bot] 后台任务状态读取失败 ({label}): {error}")
+                return
+            if exc:
+                print(f"[Bot] 后台任务异常 ({label}): {exc}")
+
+        task.add_done_callback(_cleanup)
     
     async def _get_user_config(self, user_id: str) -> Dict[str, Any]:
         """获取用户配置（带缓存），委托到 UserResourceCache。"""
@@ -1267,6 +1288,14 @@ class Bot:
                 }
                 print(f"[Bot] 视频已生成: {video_url}")
 
+            cleaned_response = await self._maybe_execute_im_actions(
+                cleaned_response,
+                user_id=user_id,
+                session_id=session_id,
+                trigger_message=message,
+                source="chat",
+            )
+
             # 处理回复中的委派标签 [DELEGATE: ...]
             cleaned_response, delegate_task = extract_delegate_tag(cleaned_response)
             if delegate_task and self.agent_delegator and self.agent_delegator.enabled:
@@ -1406,6 +1435,14 @@ class Bot:
                 }
                 print(f"[Bot Stream] 视频已生成: {video_url}")
 
+            cleaned_response = await self._maybe_execute_im_actions(
+                cleaned_response,
+                user_id=user_id,
+                session_id=session_id,
+                trigger_message=message,
+                source="chat",
+            )
+
             # 如果清理后的响应与原始响应不同，需要重新记录到历史
             if cleaned_response != full_response:
                 full_response = cleaned_response
@@ -1436,8 +1473,13 @@ class Bot:
             self._trim_conversation_history(memory_session_id, user_id)
 
             # 将对话添加到记忆系统
-            await self._add_conversation_to_memory(user_id, session_id, message, full_response)
-            mark("conversation_persisted")
+            self._track_background_task(
+                asyncio.create_task(
+                    self._add_conversation_to_memory(user_id, session_id, message, full_response)
+                ),
+                label=f"conversation_memory:{user_id}:{session_id}",
+            )
+            mark("conversation_persist_scheduled")
 
             print(
                 f"[Latency][bot.chat_stream] user_id={user_id} session_id={session_id} "
@@ -1483,6 +1525,13 @@ class Bot:
             )
 
             response = await provider.chat(self._to_llm_messages(enhanced_history))
+            response = await self._maybe_execute_im_actions(
+                response,
+                user_id=user_id,
+                session_id=session_id,
+                trigger_message=instruction,
+                source="proactive",
+            )
 
             history.append({
                 "role": "assistant",
@@ -1524,6 +1573,30 @@ class Bot:
         if not self.mcp_manager:
             raise ValueError("MCP 扩展未初始化")
         return await self.mcp_manager.execute_tool(plugin_name, tool_name, params or {})
+
+    async def _maybe_execute_im_actions(
+        self,
+        response: str,
+        *,
+        user_id: str,
+        session_id: Optional[str],
+        trigger_message: str,
+        source: str,
+    ) -> str:
+        cleaned, payload = extract_im_actions_block(response)
+        if not payload:
+            return response
+        try:
+            await self.companion_action_manager.execute_from_payload(
+                companion_user_id=user_id,
+                payload=payload,
+                source=source,
+                trigger_message=trigger_message,
+                session_id=session_id,
+            )
+        except Exception as e:
+            print(f"[IM Actions] 执行失败: {e}")
+        return cleaned
     
     async def test_connection(self) -> bool:
         """测试LLM连接"""
@@ -1964,6 +2037,13 @@ class Bot:
         image_data = self._last_generated_image
         self._last_generated_image = None
         return image_data
+
+    def peek_last_generated_image(self) -> Optional[Dict[str, Any]]:
+        """查看最近生成的图片数据但不清除。
+
+        供同一轮内部联动使用，例如回复里先生成图片，再复用为 IM 动作素材。
+        """
+        return self._last_generated_image
 
     async def generate_video(
         self,

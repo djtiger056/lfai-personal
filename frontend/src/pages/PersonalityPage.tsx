@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Button, Card, Form, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd'
+import { Button, Card, Form, Input, InputNumber, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd'
 import { ReloadOutlined, SaveOutlined } from '@ant-design/icons'
-import { accountsApi, LinyuAIAccount, promptApi } from '@/services/api'
+import { accountsApi, CompanionActionCatalogItem, CompanionActionConfig, CompanionActionLog, LinyuAIAccount, promptApi } from '@/services/api'
 
 const { TextArea } = Input
 const { Text } = Typography
@@ -10,6 +10,15 @@ type PromptFormValues = {
   content: string
   rules: string
   summary?: string
+}
+
+type ActionFormValues = {
+  enabled: boolean
+  allow_actions: string[]
+  max_actions_per_plan: number
+  max_actions_per_hour: number
+  max_actions_per_day: number
+  max_proactive_messages_per_friend_per_hour: number
 }
 
 const companionIdOf = (account: LinyuAIAccount): string => account.companion_id || `companion:${account.id}`
@@ -34,12 +43,16 @@ const platformLabel = (account?: LinyuAIAccount): string => {
 
 const PersonalityPage: React.FC = () => {
   const [form] = Form.useForm<PromptFormValues>()
+  const [actionsForm] = Form.useForm<ActionFormValues>()
   const [companions, setCompanions] = useState<LinyuAIAccount[]>([])
   const [selectedAIId, setSelectedAIId] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [actionSaving, setActionSaving] = useState(false)
   const [promptMeta, setPromptMeta] = useState<{ is_custom: boolean; updated_at?: string; source: string } | null>(null)
   const [rulesMeta, setRulesMeta] = useState<{ is_custom: boolean } | null>(null)
+  const [actionCatalog, setActionCatalog] = useState<CompanionActionCatalogItem[]>([])
+  const [actionLogs, setActionLogs] = useState<CompanionActionLog[]>([])
 
   const selectedCompanion = useMemo(
     () => companions.find((item) => item.id === selectedAIId),
@@ -60,6 +73,15 @@ const PersonalityPage: React.FC = () => {
       message.error(error.response?.data?.detail || '加载伴侣账号失败')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadActionCatalog = async () => {
+    try {
+      const data = await accountsApi.getCompanionActionsCatalog()
+      setActionCatalog(data)
+    } catch (error: any) {
+      message.error(error.response?.data?.detail || '加载动作目录失败')
     }
   }
 
@@ -87,12 +109,42 @@ const PersonalityPage: React.FC = () => {
     }
   }
 
+  const loadActionConfig = async (companionId: string) => {
+    if (!companionId) {
+      actionsForm.resetFields()
+      setActionLogs([])
+      return
+    }
+    setLoading(true)
+    try {
+      const [cfg, logs] = await Promise.all([
+        accountsApi.getCompanionActionsConfig(companionId),
+        accountsApi.listCompanionActionLogs(companionId, 50),
+      ])
+      actionsForm.setFieldsValue({
+        enabled: cfg.enabled,
+        allow_actions: cfg.allow_actions || [],
+        max_actions_per_plan: cfg.rate_limits?.max_actions_per_plan ?? 3,
+        max_actions_per_hour: cfg.rate_limits?.max_actions_per_hour ?? 10,
+        max_actions_per_day: cfg.rate_limits?.max_actions_per_day ?? 50,
+        max_proactive_messages_per_friend_per_hour: cfg.rate_limits?.max_proactive_messages_per_friend_per_hour ?? 10,
+      })
+      setActionLogs(logs)
+    } catch (error: any) {
+      message.error(error.response?.data?.detail || '加载自主动作配置失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadCompanions()
+    loadActionCatalog()
   }, [])
 
   useEffect(() => {
     loadPrompt(selectedCompanionId)
+    loadActionConfig(selectedCompanionId)
   }, [selectedCompanionId])
 
   const savePrompt = async () => {
@@ -126,6 +178,35 @@ const PersonalityPage: React.FC = () => {
       message.error(error.response?.data?.detail || '重置人设提示词失败')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const saveActionsConfig = async () => {
+    if (!selectedCompanionId) {
+      message.warning('请选择伴侣账号')
+      return
+    }
+    const values = await actionsForm.validateFields()
+    setActionSaving(true)
+    try {
+      await accountsApi.updateCompanionActionsConfig(selectedCompanionId, {
+        enabled: values.enabled,
+        autonomy_mode: 'auto',
+        target_scope: 'bound_and_friends',
+        allow_actions: values.allow_actions || [],
+        rate_limits: {
+          max_actions_per_plan: values.max_actions_per_plan,
+          max_actions_per_hour: values.max_actions_per_hour,
+          max_actions_per_day: values.max_actions_per_day,
+          max_proactive_messages_per_friend_per_hour: values.max_proactive_messages_per_friend_per_hour,
+        },
+      })
+      message.success('自主 IM 动作配置已保存')
+      await loadActionConfig(selectedCompanionId)
+    } catch (error: any) {
+      message.error(error.response?.data?.detail || '保存自主动作配置失败')
+    } finally {
+      setActionSaving(false)
     }
   }
 
@@ -247,6 +328,88 @@ const PersonalityPage: React.FC = () => {
               onClick: () => setSelectedAIId(record.id),
               style: { cursor: 'pointer' },
             })}
+          />
+        </Card>
+
+        <Card title="自主 IM 动作">
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Text type="secondary">
+              默认运行模式：完全自主执行、静默执行但保留强审计日志。当前目标范围固定为“绑定对象 + 现有好友”。
+            </Text>
+            <Text type="warning">
+              红包能力当前仅为云端占位接口：会记录 `red_packet.prepare` 意图与状态，但不会产生真实金额流转，也不会向聊天对象伪造红包消息。
+            </Text>
+            <Form form={actionsForm} layout="vertical">
+              <Form.Item name="enabled" label="启用自主 IM 动作" valuePropName="checked">
+                <Switch disabled={!selectedCompanionId} />
+              </Form.Item>
+              <Form.Item name="allow_actions" label="允许动作">
+                <Select
+                  mode="multiple"
+                  disabled={!selectedCompanionId}
+                  options={actionCatalog.map((item) => ({
+                    value: item.name,
+                    label: `${item.name} · ${item.description}`,
+                  }))}
+                />
+              </Form.Item>
+              <Space wrap size={16}>
+                <Form.Item name="max_actions_per_plan" label="单次规划动作上限">
+                  <InputNumber min={1} max={20} disabled={!selectedCompanionId} />
+                </Form.Item>
+                <Form.Item name="max_actions_per_hour" label="每小时动作上限">
+                  <InputNumber min={1} max={200} disabled={!selectedCompanionId} />
+                </Form.Item>
+                <Form.Item name="max_actions_per_day" label="每天动作上限">
+                  <InputNumber min={1} max={1000} disabled={!selectedCompanionId} />
+                </Form.Item>
+                <Form.Item name="max_proactive_messages_per_friend_per_hour" label="单好友每小时主动私聊上限">
+                  <InputNumber min={1} max={200} disabled={!selectedCompanionId} />
+                </Form.Item>
+              </Space>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={actionSaving}
+                disabled={!selectedCompanionId}
+                onClick={saveActionsConfig}
+              >
+                保存动作配置
+              </Button>
+            </Form>
+          </Space>
+        </Card>
+
+        <Card title="最近动作日志">
+          <Table
+            rowKey="id"
+            size="small"
+            dataSource={actionLogs}
+            pagination={{ pageSize: 8 }}
+            columns={[
+              { title: '时间', dataIndex: 'created_at', render: (value) => value ? new Date(value).toLocaleString('zh-CN') : '-' },
+              { title: '来源', dataIndex: 'source', width: 90 },
+              { title: '动作', dataIndex: 'action_name', width: 180 },
+              { title: '目标', dataIndex: 'target_key', width: 160, render: (value) => value || '-' },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                width: 90,
+                render: (value) => {
+                  if (value === 'success') return <Tag color="green">成功</Tag>
+                  if (value === 'blocked') return <Tag color="orange">拦截</Tag>
+                  return <Tag color="red">失败</Tag>
+                },
+              },
+              {
+                title: '结果',
+                render: (_, record) => (
+                  <Text type={record.error_message ? 'danger' : 'secondary'}>
+                    {record.error_message || JSON.stringify(record.result || {})}
+                  </Text>
+                ),
+              },
+            ]}
           />
         </Card>
       </Space>
