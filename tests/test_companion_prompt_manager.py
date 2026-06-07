@@ -96,7 +96,7 @@ async def test_bot_context_uses_companion_specific_prompt(monkeypatch, tmp_path)
     bot._build_memory_context = lambda relevant_memories, history, limit=3: ""
 
     history = [{"role": "system", "content": bot._user_cache.get_system_prompt("companion:1")}]
-    enhanced = await bot._context_builder.build(
+    result = await bot._context_builder.build(
         message="你好",
         user_id="companion:1",
         session_id="companion_session:1:linyu:user-a",
@@ -104,6 +104,7 @@ async def test_bot_context_uses_companion_specific_prompt(monkeypatch, tmp_path)
         relevant_memories=[],
     )
 
-    assert enhanced[0]["role"] == "system"
-    assert enhanced[0]["content"] == "栗子专属人设"
+    assert result.history_messages == []
+    assert result.dynamic_blocks == []
+    assert bot._user_cache.get_system_prompt("companion:1") == "栗子专属人设"
     assert manager.get_effective_prompt("companion:2") == "小馨专属人设"

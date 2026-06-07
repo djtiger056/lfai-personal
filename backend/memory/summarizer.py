@@ -10,6 +10,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from ..prompt_assembly import PromptAssembler, PromptBlueprint, invoke_provider_chat
 
 
 @dataclass
@@ -24,6 +25,7 @@ class ExtractedFact:
 class LLMSummarizer:
     def __init__(self, llm_config: Dict[str, Any]):
         self.llm_config = llm_config or {}
+        self._prompt_assembler = PromptAssembler()
 
     def _build_messages(self, conversations: List[Dict[str, str]], overlap_tail: Optional[List[Dict[str, str]]] = None,
                         max_facts: int = 20) -> List[Dict[str, str]]:
@@ -55,16 +57,41 @@ class LLMSummarizer:
             },
         }
 
-        system = (
-            "你是一个“对话记忆摘要与事实抽取器”。\n"
-            "严格遵守：\n"
-            "1) 只能基于输入内容，不得编造。\n"
-            "2) 输出必须是单个 JSON 对象，不要包含任何额外文本。\n"
-            "3) facts 中每条必须给出 1-3 条 evidence（直接引用输入原文，尽量短）。\n"
-            "4) 如果没有足够证据，facts 里不要输出该条。\n"
+        rendered = self._prompt_assembler.render_messages(
+            PromptBlueprint(name="memory_summary_v2"),
+            [
+                self._prompt_assembler.make_identity_block(
+                    block_id="memory_summary_role",
+                    title="角色定位",
+                    content="你是一个对话记忆摘要与事实抽取器。",
+                    stability="static",
+                ),
+                self._prompt_assembler.make_behavior_block(
+                    block_id="memory_summary_rules",
+                    title="输出原则",
+                    rules=[
+                        "只能基于输入内容，不得编造。",
+                        "输出必须是单个 JSON 对象，不要包含额外文本。",
+                        "facts 中每条必须给出 1-3 条直接证据。",
+                        "没有足够证据的事实不要输出。",
+                    ],
+                    stability="static",
+                ),
+                self._prompt_assembler.make_task_block(
+                    block_id="memory_summary_task",
+                    title="输出目标",
+                    content="生成 chunk_summary、facts、open_loops、topics 四类结果。",
+                    stability="turn",
+                ),
+                self._prompt_assembler.make_input_block(
+                    block_id="memory_summary_input",
+                    title="输入数据",
+                    content=json.dumps(payload, ensure_ascii=False, indent=2),
+                    stability="turn",
+                ),
+            ],
         )
-        user = "请根据以下输入生成摘要与事实抽取结果：\n" + json.dumps(payload, ensure_ascii=False)
-        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        return rendered.messages
 
     def _extract_json_object(self, text: str) -> Dict[str, Any]:
         text = text.strip()
@@ -156,7 +183,7 @@ class LLMSummarizer:
         provider_name = self.llm_config.get("provider") or "openai"
         provider = get_provider(provider_name, llm_config=self.llm_config)
 
-        raw = await provider.chat(messages)
+        raw = await invoke_provider_chat(provider, messages)
         obj = self._extract_json_object(raw)
         summary, facts, open_loops, topics = self._validate(obj, max_facts=max_facts)
 
@@ -166,4 +193,3 @@ class LLMSummarizer:
             "topics": topics,
         }
         return summary, facts, meta
-

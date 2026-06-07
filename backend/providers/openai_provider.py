@@ -74,6 +74,7 @@ class OpenAIProvider(BaseLLMProvider):
     async def chat(self, messages: list, **kwargs) -> str:
         """发送聊天消息并获取回复（带重试机制）"""
         url = f"{self.api_base}/chat/completions"
+        prompt_trace = kwargs.pop("prompt_trace", None)
 
         data = {
             "model": kwargs.get('model', self.model),
@@ -84,7 +85,13 @@ class OpenAIProvider(BaseLLMProvider):
             "frequency_penalty": kwargs.get('frequency_penalty', self.frequency_penalty),
             "stream": False
         }
-        record_payload(self.provider_name, data["model"], messages, {"stream": False})
+        record_payload(
+            self.provider_name,
+            data["model"],
+            messages,
+            {"stream": False},
+            prompt_trace=prompt_trace,
+        )
 
         # 使用配置的超时设置
         timeout = ClientTimeout(
@@ -133,6 +140,7 @@ class OpenAIProvider(BaseLLMProvider):
     async def chat_stream(self, messages: list, **kwargs) -> AsyncGenerator[str, None]:
         """流式聊天回复（带重试机制）"""
         url = f"{self.api_base}/chat/completions"
+        prompt_trace = kwargs.pop("prompt_trace", None)
 
         data = {
             "model": kwargs.get('model', self.model),
@@ -143,7 +151,13 @@ class OpenAIProvider(BaseLLMProvider):
             "frequency_penalty": kwargs.get('frequency_penalty', self.frequency_penalty),
             "stream": True
         }
-        record_payload(self.provider_name, data["model"], messages, {"stream": True})
+        record_payload(
+            self.provider_name,
+            data["model"],
+            messages,
+            {"stream": True},
+            prompt_trace=prompt_trace,
+        )
 
         # 使用配置的超时设置
         timeout = ClientTimeout(

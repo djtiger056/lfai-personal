@@ -58,6 +58,16 @@ def _print_record(record: Dict[str, Any], index: int) -> None:
     print(f"\n===== 请求 #{index} =====")
     print(f"时间: {ts}")
     print(f"provider: {provider} | model: {model} | message_count: {msg_count} | extra: {extra}")
+    prompt_trace = record.get("prompt_trace") or {}
+    if prompt_trace:
+        print(
+            "prompt_trace: "
+            f"blueprint={prompt_trace.get('prompt_blueprint')} | "
+            f"static_prefix_hash={prompt_trace.get('static_prefix_hash')} | "
+            f"full_prompt_hash={prompt_trace.get('full_prompt_hash')} | "
+            f"dynamic_block_ids={prompt_trace.get('dynamic_block_ids')} | "
+            f"stable_prefix_char_count={prompt_trace.get('stable_prefix_char_count')}"
+        )
 
     messages = record.get("messages") or []
     for i, message in enumerate(messages, start=1):
@@ -72,6 +82,7 @@ def main() -> None:
     parser.add_argument("--dir", default=str(_default_trace_dir()), help="trace directory")
     parser.add_argument("--last", type=int, default=1, help="show last N requests")
     parser.add_argument("--stream", choices=["true", "false", "all"], default="all", help="filter by extra.stream")
+    parser.add_argument("--diff-last", action="store_true", help="show prompt_trace diff for the last two records")
     args = parser.parse_args()
 
     trace_dir = Path(args.dir)
@@ -93,7 +104,24 @@ def main() -> None:
     for idx, rec in enumerate(selected, start=1):
         _print_record(rec, idx)
 
+    if args.diff_last:
+        if len(records) < 2:
+            print("\n没有足够记录用于 diff")
+            return
+        prev = records[-2].get("prompt_trace") or {}
+        curr = records[-1].get("prompt_trace") or {}
+        print("\n===== prompt_trace diff =====")
+        keys = sorted(set(prev.keys()) | set(curr.keys()))
+        for key in keys:
+            left = prev.get(key)
+            right = curr.get(key)
+            if left == right:
+                print(f"{key}: SAME")
+            else:
+                print(f"{key}:")
+                print(f"  prev={left}")
+                print(f"  curr={right}")
+
 
 if __name__ == "__main__":
     main()
-

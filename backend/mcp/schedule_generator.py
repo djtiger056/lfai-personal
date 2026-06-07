@@ -14,6 +14,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from backend.prompt_assembly import PromptAssembler, PromptBlueprint, invoke_provider_chat
 
 try:
     from zoneinfo import ZoneInfo
@@ -92,6 +93,7 @@ class DailyScheduleGenerator:
         self.output_path = Path(output_path or default_generated_path())
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self._tz = self._resolve_tz(timezone_name)
+        self._prompt_assembler = PromptAssembler()
 
     # ------------------------------------------------------------------ #
     #  公开接口
@@ -212,19 +214,46 @@ class DailyScheduleGenerator:
             if provider is None:
                 raise RuntimeError("Bot provider 未初始化")
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是一个作息表生成助手，只输出 JSON 数组，不输出任何解释文字。"
-                    "严格遵守格式要求，确保时间段覆盖全天且首尾相接。"
+        rendered = self._prompt_assembler.render_messages(
+            PromptBlueprint(name="daily_schedule_generation_v2"),
+            [
+                self._prompt_assembler.make_identity_block(
+                    block_id="schedule_role",
+                    title="角色定位",
+                    content="你是一个作息表生成助手。",
+                    stability="static",
                 ),
-            },
-            {"role": "user", "content": prompt},
-        ]
+                self._prompt_assembler.make_behavior_block(
+                    block_id="schedule_rules",
+                    title="输出原则",
+                    rules=[
+                        "输出必须是 JSON 数组，不要附加解释文字。",
+                        "时间段必须覆盖全天且首尾相接。",
+                        "作息要真实、自然、可执行。",
+                    ],
+                    stability="static",
+                ),
+                self._prompt_assembler.make_task_block(
+                    block_id="schedule_task",
+                    title="输出目标",
+                    content="生成当天的详细作息时间表。",
+                    stability="turn",
+                ),
+                self._prompt_assembler.make_input_block(
+                    block_id="schedule_input",
+                    title="生成要求",
+                    content=prompt,
+                    stability="turn",
+                ),
+            ],
+        )
 
         if hasattr(provider, "chat"):
-            return await provider.chat(messages)
+            return await invoke_provider_chat(
+                provider,
+                rendered.messages,
+                prompt_trace=rendered.trace,
+            )
         raise RuntimeError(f"Provider {provider} 不支持 chat 方法")
 
     def _parse_slots(self, raw: str) -> List[Dict[str, Any]]:

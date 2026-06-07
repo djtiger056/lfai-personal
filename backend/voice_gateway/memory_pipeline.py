@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
+from backend.prompt_assembly import PromptAssembler, PromptBlueprint, VOICE_BEHAVIOR_RULES
 from backend.utils.datetime_utils import get_now
 
 from .config import VoiceGatewayMemoryConfig
@@ -29,6 +30,7 @@ class VoiceMemoryPipeline:
         self._short_window: Dict[str, List[Dict[str, str]]] = {}
         self._compressed: Dict[str, str] = {}
         self._finalized: Dict[str, bool] = {}
+        self._prompt_assembler = PromptAssembler()
 
     async def _ensure_memory_manager(self):
         manager = getattr(self.bot, "memory_manager", None)
@@ -55,28 +57,63 @@ class VoiceMemoryPipeline:
             limit=self.cfg.mid_term_rounds_n,
         )
 
-        lines: List[str] = []
+        blocks = [
+            self._prompt_assembler.make_identity_block(
+                block_id="voice_role",
+                title="对话身份",
+                content=self.bot._get_user_system_prompt(user_id),
+                stability="session",
+            ),
+            self._prompt_assembler.make_behavior_block(
+                block_id="voice_rules",
+                title="语音回复原则",
+                rules=VOICE_BEHAVIOR_RULES,
+                stability="static",
+            ),
+        ]
         if short_memories:
-            lines.append("短期记忆：")
+            short_lines: List[str] = []
             for item in short_memories[-self.cfg.short_term_rounds_n * 2:]:
                 message = item.get("message") or {}
                 role = message.get("role", "unknown")
                 content = (message.get("content", "") or "").strip()
                 if content:
-                    lines.append(f"- [{role}] {content}")
+                    short_lines.append(f"- [{role}] {content}")
+            if short_lines:
+                blocks.append(
+                    self._prompt_assembler.make_context_block(
+                        block_id="voice_short_memory",
+                        title="近期对话回顾",
+                        content="\n".join(short_lines),
+                        stability="session",
+                    )
+                )
 
         if mid_summaries:
-            lines.append("中期记忆摘要：")
+            summary_lines: List[str] = []
             for item in reversed(mid_summaries):
                 summary = (item.get("summary") or "").strip()
                 if summary:
-                    lines.append(f"- {summary}")
+                    summary_lines.append(f"- {summary}")
+            if summary_lines:
+                blocks.append(
+                    self._prompt_assembler.make_context_block(
+                        block_id="voice_mid_memory",
+                        title="中期回顾摘要",
+                        content="\n".join(summary_lines),
+                        stability="session",
+                    )
+                )
 
         self._short_window[session_id] = []
         self._compressed[session_id] = ""
         self._finalized[session_id] = False
 
-        return "\n".join(lines)
+        rendered = self._prompt_assembler.render_instructions(
+            PromptBlueprint(name="voice_session_context_v2", stable_prefix_message_count=1),
+            blocks,
+        )
+        return self._prompt_assembler.build_instruction_text(rendered)
 
     async def on_turn(
         self,

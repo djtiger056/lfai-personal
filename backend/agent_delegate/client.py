@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Optional
 
 import aiohttp
+from backend.prompt_assembly import PromptAssembler, PromptBlueprint
 
 from .config import HermesConfig
 
@@ -40,6 +41,7 @@ class HermesClient:
     def __init__(self, config: HermesConfig):
         self._config = config
         self._base_url = config.api_base.rstrip("/")
+        self._prompt_assembler = PromptAssembler()
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -76,14 +78,43 @@ class HermesClient:
         Returns:
             RunResult 包含状态和输出
         """
-        messages = []
+        blocks = []
         if instructions:
-            messages.append({"role": "system", "content": instructions})
-        messages.append({"role": "user", "content": task})
+            blocks.append(
+                self._prompt_assembler.make_identity_block(
+                    block_id="delegate_role",
+                    title="执行角色",
+                    content=instructions,
+                    stability="static",
+                )
+            )
+        blocks.append(
+            self._prompt_assembler.make_behavior_block(
+                block_id="delegate_rules",
+                title="执行原则",
+                rules=[
+                    "准确执行用户委派的任务。",
+                    "优先给出清晰、完整、可直接使用的结果。",
+                ],
+                stability="static",
+            )
+        )
+        blocks.append(
+            self._prompt_assembler.make_input_block(
+                block_id="delegate_input",
+                title="任务描述",
+                content=task,
+                stability="turn",
+            )
+        )
+        rendered = self._prompt_assembler.render_messages(
+            PromptBlueprint(name="agent_delegate_v2"),
+            blocks,
+        )
 
         payload = {
             "model": "hermes-agent",
-            "messages": messages,
+            "messages": rendered.messages,
             "stream": False,
         }
 

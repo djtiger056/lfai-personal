@@ -1,24 +1,16 @@
 """上下文构建器
 
-负责将各种上下文源（记忆、MCP、companion hint、时间连续性感知等）注入到 enhanced_history 中，
-供 LLM 调用使用。从 bot.py 中提取，消除 chat/chat_stream/generate_proactive_reply 的重复代码。
-
-消息结构（双 system 设计）：
-  ① system（人设层）   — 来自 system_prompt，静态，每轮不变
-  ② system（协议层）   — 来自 system_rules，功能协议，静态，每轮不变
-  ③ user/assistant     — 历史消息（含时间标记前缀），连续排列
-  ④ user               — 当前消息
-
-动态上下文（时间感知、记忆、MCP、伴侣模式提示）追加到 ① 的末尾，
-保持历史消息和当前消息的连续性不被打断。
+负责收集对话所需的动态上下文，并将其整理为结构化 blocks。
+这些 blocks 会交给 Prompt Assembly 层统一渲染成更清晰、稳定、缓存友好的 prompt。
 """
 
 from __future__ import annotations
 
-import copy
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from ..prompt_assembly import PromptBlock
 from ..utils.datetime_utils import get_now, from_isoformat
 
 if TYPE_CHECKING:
@@ -65,11 +57,11 @@ def _format_relative_date(past: datetime, now: datetime) -> str:
 
 
 class ContextBuilder:
-    """构建 LLM 调用所需的增强上下文（enhanced_history）。
+    """构建 LLM 调用所需的动态上下文 blocks。
 
     使用方式：
         builder = ContextBuilder(bot)
-        enhanced = await builder.build(
+        snapshot = await builder.build(
             message=message,
             user_id=user_id,
             session_id=session_id,
@@ -85,6 +77,14 @@ class ContextBuilder:
         """
         self._bot = bot
 
+    @dataclass
+    class BuildResult:
+        history_messages: List[Dict[str, Any]] = field(default_factory=list)
+        dynamic_blocks: List[PromptBlock] = field(default_factory=list)
+        message: str = ""
+        user_id: str = ""
+        session_id: str = ""
+
     async def build(
         self,
         message: str,
@@ -92,152 +92,58 @@ class ContextBuilder:
         session_id: str,
         history: List[Dict[str, Any]],
         relevant_memories: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[Dict[str, Any]]:
-        """构建增强的对话历史。
-
-        最终 messages 结构：
-          [0] system（人设层 + 动态上下文）
-          [1] system（功能协议层，仅在有内容时插入）
-          [2..N-1] user/assistant 历史消息（含时间标记前缀）
-          [N] user 当前消息
+    ) -> "ContextBuilder.BuildResult":
+        """构建结构化动态上下文。
 
         Args:
             message: 当前用户消息（或主动聊天的 instruction）
             user_id: 用户 ID
             session_id: 会话 ID
-            history: 原始对话历史（不会被修改）
+            history: 原始对话历史
             relevant_memories: 已检索到的长期记忆列表
 
         Returns:
-            增强后的对话历史（深拷贝，不影响原始 history）
+            含历史消息和动态 blocks 的结果对象
         """
-        enhanced_history = copy.deepcopy(history)
+        history_messages = self._clone_history_with_time_markers(history)
+        dynamic_blocks: List[PromptBlock] = []
 
-        # ── 动态上下文：全部追加到 system[0]（人设层）末尾 ──────────────────
-
-        # 0. 时间连续性感知（最高优先级，让 AI 知道对话间隔和时段变化）
         time_continuity_hint = self._build_time_continuity_hint(history)
         if time_continuity_hint:
-            self._append_to_persona_system(enhanced_history, time_continuity_hint)
+            dynamic_blocks.append(self._make_context_block("time_continuity", "时间连续性", time_continuity_hint))
 
-        # 1. 同类问题间隔较久时按"新一轮近况"处理
         long_gap_repeat_hint = self._bot._build_long_gap_repeat_hint(history, message)
         if long_gap_repeat_hint:
-            self._append_to_persona_system(enhanced_history, long_gap_repeat_hint)
+            dynamic_blocks.append(self._make_context_block("long_gap_repeat", "回答方式提醒", long_gap_repeat_hint))
 
-        # 2. 降低问答机器人感：按概率提示"主动分享一点自己的状态/关系感受"
         companion_hint = self._bot._build_companion_mode_hint(session_id, history, message)
         if companion_hint:
-            self._append_to_persona_system(enhanced_history, companion_hint)
+            dynamic_blocks.append(self._make_context_block("companion_hint", "关系表达提醒", companion_hint))
 
-        # 3. 从 MCP 扩展收集自动上下文（例如当前时间）
         mcp_blocks = await self._collect_mcp_context(message)
         if mcp_blocks:
-            mcp_context = "以下是 MCP 提供的实时上下文：\n" + "\n".join(
-                f"- {block}" for block in mcp_blocks
-            )
-            self._append_to_persona_system(enhanced_history, mcp_context)
+            dynamic_blocks.append(self._make_context_block("mcp_context", "实时上下文", "\n".join(f"- {block}" for block in mcp_blocks)))
 
-        # 4. 注入中期摘要上下文（可配置条数）
-        await self._bot._append_mid_term_context(enhanced_history, user_id, session_id)
+        mid_term_context = await self._bot._collect_mid_term_context(user_id, session_id)
+        if mid_term_context:
+            dynamic_blocks.append(self._make_context_block("mid_term_summary", "中期回顾", mid_term_context))
 
-        # 5. 注入长期记忆上下文
         if relevant_memories:
             memory_context = self._bot._build_memory_context(relevant_memories, history, limit=3)
             if memory_context:
-                self._append_to_persona_system(enhanced_history, memory_context)
+                dynamic_blocks.append(self._make_context_block("long_term_memory", "长期记忆", memory_context))
 
-        # 6. 仅当当前用户消息主动命中视频生成意图时，临时注入视频生成协议。
         video_generation_hint = self._bot._build_video_generation_hint(user_id, session_id, message)
         if video_generation_hint:
-            self._append_to_persona_system(enhanced_history, video_generation_hint)
+            dynamic_blocks.append(self._make_context_block("video_generation_hint", "临时任务提示", video_generation_hint))
 
-        # ── 功能协议层：作为独立的第二条 system 消息插入历史之前 ──────────────
-
-        # 7. 注入功能协议（视觉/语音/委派协议，与人设分离）
-        self._inject_rules_system(enhanced_history, user_id)
-
-        # ── 历史消息处理 ────────────────────────────────────────────────────
-
-        # 8. 为历史消息插入时间标记（让 LLM 看到对话中的时间流逝）
-        self._inject_time_markers(enhanced_history)
-
-        # ── 当前消息 ─────────────────────────────────────────────────────────
-
-        # 9. 添加当前用户消息（紧接历史消息，保持对话连续性）
-        enhanced_history.append({
-            "role": "user",
-            "content": message,
-        })
-
-        return enhanced_history
-
-    # ── 功能协议注入 ──────────────────────────────────────────────────────────
-
-    def _inject_rules_system(
-        self,
-        enhanced_history: List[Dict[str, Any]],
-        user_id: str,
-    ) -> None:
-        """将功能协议作为独立的第二条 system 消息插入。
-
-        插入位置：所有 system 消息之后、第一条非 system 消息之前。
-        如果 system_rules 为空则不插入，避免产生空 system 消息。
-        """
-        rules = self._bot._user_cache.get_system_rules(user_id)
-        if not rules or not rules.strip():
-            return
-
-        # 找到第一条非 system 消息的位置
-        insert_pos = 0
-        for i, msg in enumerate(enhanced_history):
-            if msg.get("role") != "system":
-                insert_pos = i
-                break
-        else:
-            # 全是 system 消息（极少见），追加到末尾
-            insert_pos = len(enhanced_history)
-
-        enhanced_history.insert(insert_pos, {
-            "role": "system",
-            "content": rules.strip(),
-        })
-
-    # ── 动态上下文注入（追加到人设 system 末尾）────────────────────────────────
-
-    @staticmethod
-    def _append_to_persona_system(
-        enhanced_history: List[Dict[str, Any]],
-        content: str,
-    ) -> None:
-        """将动态上下文追加到第一条 system 消息（人设层）末尾。
-
-        如果历史中没有 system 消息，则插入一条新的。
-        注意：此方法只操作第一条 system 消息，不影响后续的功能协议 system 消息。
-        """
-        content = str(content or "").strip()
-        if not content:
-            return
-        if enhanced_history and enhanced_history[0].get("role") == "system":
-            base_content = str(enhanced_history[0].get("content", "") or "")
-            if base_content:
-                enhanced_history[0]["content"] = base_content + "\n\n" + content
-            else:
-                enhanced_history[0]["content"] = content
-        else:
-            enhanced_history.insert(0, {
-                "role": "system",
-                "content": content,
-            })
-
-    # 向后兼容别名（_append_mid_term_context 内部仍调用此方法）
-    @staticmethod
-    def _inject_system_content(
-        enhanced_history: List[Dict[str, Any]],
-        content: str,
-    ) -> None:
-        """向后兼容：等同于 _append_to_persona_system。"""
-        ContextBuilder._append_to_persona_system(enhanced_history, content)
+        return ContextBuilder.BuildResult(
+            history_messages=history_messages,
+            dynamic_blocks=dynamic_blocks,
+            message=str(message or ""),
+            user_id=str(user_id or ""),
+            session_id=str(session_id or ""),
+        )
 
     # ── 第一层：对话间隔感知 ──────────────────────────────────────────────────
 
@@ -392,6 +298,26 @@ class ContextBuilder:
         for msg_idx, marker in reversed(insertions):
             original_content = str(enhanced_history[msg_idx].get("content", "") or "")
             enhanced_history[msg_idx]["content"] = f"{marker}\n{original_content}"
+
+    def _clone_history_with_time_markers(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        cloned = [
+            dict(item)
+            for item in history
+            if str(item.get("role", "") or "").strip() in {"user", "assistant"}
+        ]
+        self._inject_time_markers(cloned)
+        return cloned
+
+    @staticmethod
+    def _make_context_block(block_id: str, title: str, content: str) -> PromptBlock:
+        return PromptBlock(
+            id=block_id,
+            role="user",
+            layer="context",
+            stability="turn",
+            title=title,
+            content=str(content or ""),
+        )
 
     # ── 工具方法 ──────────────────────────────────────────────────────────────
 

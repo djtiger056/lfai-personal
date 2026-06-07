@@ -22,6 +22,17 @@ from ..emote import EmoteManager, EmoteConfig
 from ..agent_delegate import AgentDelegator, extract_delegate_tag
 from ..agent_delegate.config import AgentDelegateConfig
 from ..im_actions import CompanionActionManager, extract_im_actions_block
+from ..prompt_assembly import (
+    DEFAULT_BEHAVIOR_RULES,
+    ROLEPLAY_BEHAVIOR_RULES,
+    ROLEPLAY_CAPABILITY_RULES,
+    VOICE_BEHAVIOR_RULES,
+    PromptAssembler,
+    PromptBlock,
+    PromptBlueprint,
+    invoke_provider_chat,
+    invoke_provider_chat_stream,
+)
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now, from_isoformat
 from ..utils.companion_identity import normalize_companion_memory_scope
@@ -169,6 +180,7 @@ class Bot:
 
         # 上下文构建器（消除 chat/chat_stream/generate_proactive_reply 中的重复逻辑）
         self._context_builder = ContextBuilder(self)
+        self._prompt_assembler = PromptAssembler()
 
         # 初始化 Agent 委派器
         self.agent_delegator: Optional[AgentDelegator] = None
@@ -283,19 +295,18 @@ class Bot:
             print(f"获取相关记忆失败: {e}")
             return []
 
-    async def _append_mid_term_context(self, enhanced_history: List[Dict[str, str]],
-                                      user_id: str, session_id: str):
-        """将中期摘要注入到LLM上下文中（用于连续性）"""
+    async def _collect_mid_term_context(self, user_id: str, session_id: str) -> str:
+        """收集用于提示词补充上下文的中期摘要文本。"""
         if not self.memory_manager or not await self._ensure_memory_manager_initialized():
-            return
+            return ""
 
         memory_user_id, memory_session_id = self._get_memory_scope(user_id, session_id)
 
         count = config.memory_config.mid_term_context_count
         if count <= 0:
-            return
+            return ""
         if not getattr(config.memory_config, "mid_term_enabled", True):
-            return
+            return ""
 
         try:
             summaries = await self.memory_manager.get_mid_term_summaries(
@@ -305,10 +316,10 @@ class Bot:
             )
         except Exception as e:
             print(f"获取中期摘要失败: {e}")
-            return
+            return ""
 
         if not summaries:
-            return
+            return ""
 
         summaries = list(reversed(summaries))
         lines: List[str] = []
@@ -323,21 +334,12 @@ class Bot:
                 lines.append(f"- {text}")
 
         if not lines:
-            return
+            return ""
 
-        context = (
-            "你对最近和对方聊过的内容有印象（以下是你的回忆片段）。"
-            "如果当前话题和之前聊过的有关，可以自然地接续；不要原文复述这些内容，不相关就不提：\n"
+        return (
+            "以下内容是近期对话的简短回顾，只在相关时自然承接，不要逐条复述：\n"
             + "\n".join(lines)
         )
-        if enhanced_history and enhanced_history[0]["role"] == "system":
-            base_content = str(enhanced_history[0].get("content", "") or "")
-            enhanced_history[0]["content"] = base_content + "\n\n" + context if base_content else context
-        else:
-            enhanced_history.insert(0, {
-                "role": "system",
-                "content": context
-            })
     
     def _normalize_text_for_compare(self, text: str) -> str:
         """归一化文本，便于进行轻量去重匹配。"""
@@ -545,11 +547,7 @@ class Bot:
                 continue
 
             seen_contents.add(normalized)
-            try:
-                similarity = float(mem.get("similarity", 0) or 0)
-            except Exception:
-                similarity = 0.0
-            selected_lines.append(f"{len(selected_lines) + 1}. {content} (相关度: {similarity:.2f})")
+            selected_lines.append(f"- {content}")
 
             if len(selected_lines) >= limit:
                 break
@@ -558,10 +556,138 @@ class Bot:
             return ""
 
         return (
-            "你记得关于对方的这些事（这是你自己的记忆，不要说'根据记忆'，"
-            "像真正记得一样自然地在相关时提及，不要逐条列举，不相关就不提）：\n"
+            "以下是与当前话题可能相关的记忆，只在自然相关时使用，不要逐条列举：\n"
             + "\n".join(selected_lines)
         )
+
+    def _build_persona_blocks(self, user_id: str, *, roleplay: bool = False) -> List[PromptBlock]:
+        assembler = getattr(self, "_prompt_assembler", PromptAssembler())
+        identity_content = (
+            self._user_cache.get_roleplay_prompt(user_id)
+            if roleplay
+            else self._get_user_system_prompt(user_id)
+        )
+        blocks: List[PromptBlock] = []
+        if identity_content:
+            blocks.append(
+                assembler.make_identity_block(
+                    block_id="persona",
+                    title="长期角色设定" if not roleplay else "情景演绎设定",
+                    content=identity_content,
+                    stability="session",
+                )
+            )
+
+        behavior_rules = ROLEPLAY_BEHAVIOR_RULES if roleplay else DEFAULT_BEHAVIOR_RULES
+        blocks.append(
+            assembler.make_behavior_block(
+                block_id="behavior_rules",
+                rules=behavior_rules,
+                stability="static",
+                title="回复原则",
+            )
+        )
+
+        capability_content = (
+            "\n".join(f"- {rule}" for rule in ROLEPLAY_CAPABILITY_RULES)
+            if roleplay
+            else str(self._user_cache.get_system_rules(user_id) or "").strip()
+        )
+        if capability_content:
+            blocks.append(
+                assembler.make_capability_block(
+                    block_id="capability_rules",
+                    title="系统能力边界",
+                    content=capability_content,
+                    stability="session",
+                )
+            )
+        return blocks
+
+    def _split_history_for_prompt(
+        self,
+        history_messages: List[Dict[str, Any]],
+    ) -> tuple[List[PromptBlock], List[Dict[str, Any]]]:
+        task_blocks: List[PromptBlock] = []
+        conversation_history: List[Dict[str, Any]] = []
+        for message in history_messages:
+            role = str(message.get("role", "") or "").strip()
+            content = str(message.get("content", "") or "").strip()
+            if role == "system":
+                continue
+            if role == "assistant" and content.startswith("[图片生成]"):
+                task_blocks.append(
+                    PromptBlock(
+                        id=f"history_task_{len(task_blocks)}",
+                        role="user",
+                        layer="task",
+                        stability="session",
+                        title="最近系统动作",
+                        content=content,
+                    )
+                )
+                continue
+            conversation_history.append(message)
+        return task_blocks, conversation_history
+
+    def _render_standard_prompt(
+        self,
+        *,
+        user_id: str,
+        build_result: ContextBuilder.BuildResult,
+        task_content: Optional[str] = None,
+        input_title: str = "当前输入",
+    ):
+        assembler = getattr(self, "_prompt_assembler", PromptAssembler())
+        blueprint = PromptBlueprint(name="companion_chat_v2")
+        history_task_blocks, history_messages = self._split_history_for_prompt(build_result.history_messages)
+        blocks = self._build_persona_blocks(user_id, roleplay=False)
+        blocks.extend(history_task_blocks)
+        blocks.extend(build_result.dynamic_blocks)
+        if task_content:
+            blocks.append(
+                assembler.make_task_block(
+                    block_id="current_task",
+                    title="任务说明",
+                    content=task_content,
+                    stability="turn",
+                )
+            )
+        blocks.append(
+            assembler.make_input_block(
+                block_id="current_input",
+                title=input_title,
+                content=build_result.message,
+                stability="turn",
+            )
+        )
+        return assembler.render_messages(blueprint, blocks, history_messages=history_messages)
+
+    def _render_roleplay_prompt(
+        self,
+        *,
+        user_id: str,
+        history_messages: List[Dict[str, Any]],
+        message: Optional[str] = None,
+    ):
+        assembler = getattr(self, "_prompt_assembler", PromptAssembler())
+        blueprint = PromptBlueprint(name="roleplay_chat_v2")
+        conversation_history = [
+            dict(item)
+            for item in history_messages
+            if str(item.get("role", "") or "").strip() in {"user", "assistant"}
+        ]
+        blocks = self._build_persona_blocks(user_id, roleplay=True)
+        if message is not None:
+            blocks.append(
+                assembler.make_input_block(
+                    block_id="roleplay_input",
+                    title="当前输入",
+                    content=message,
+                    stability="turn",
+                )
+            )
+        return assembler.render_messages(blueprint, blocks, history_messages=conversation_history)
     
     def _refresh_tts_manager(self):
         """检测TTS配置变化，必要时热更新TTS管理器"""
@@ -949,10 +1075,45 @@ class Bot:
             summaries=summaries_text,
         )
         provider = self._get_user_llm_provider(user_id)
-        summary = await provider.chat([
-            {"role": "system", "content": "你负责把情景演绎内容整理成 AI 伴侣模式可用的短期记忆。"},
-            {"role": "user", "content": prompt},
-        ])
+        assembler = getattr(self, "_prompt_assembler", PromptAssembler())
+        rendered = assembler.render_messages(
+            PromptBlueprint(name="roleplay_exit_summary_v2"),
+            [
+                assembler.make_identity_block(
+                    block_id="summary_role",
+                    title="角色定位",
+                    content="你负责把情景演绎内容整理成 AI 伴侣模式可用的短期记忆。",
+                    stability="static",
+                ),
+                assembler.make_behavior_block(
+                    block_id="summary_rules",
+                    title="输出原则",
+                    rules=[
+                        "只基于输入内容总结，不要编造。",
+                        "保留偏好、关系动态、关键剧情和未完成线索。",
+                        "输出自然中文，不要写成列表清单。",
+                    ],
+                    stability="static",
+                ),
+                assembler.make_task_block(
+                    block_id="summary_task",
+                    title="输出目标",
+                    content="整理为适合写入 AI 伴侣短期记忆的一段摘要。",
+                    stability="turn",
+                ),
+                assembler.make_input_block(
+                    block_id="summary_input",
+                    title="原始材料",
+                    content=prompt,
+                    stability="turn",
+                ),
+            ],
+        )
+        summary = await invoke_provider_chat(
+            provider,
+            rendered.messages,
+            prompt_trace=rendered.trace,
+        )
         return await self._write_roleplay_exit_summary_to_companion_memory(user_id, session_id, summary)
 
     async def _handle_mode_switch_command(self, message: str, user_id: str, session_id: str) -> Optional[str]:
@@ -1053,10 +1214,8 @@ class Bot:
         """构建情景演绎 LLM 上下文，只包含情景提示词、短期记忆和中期摘要。"""
         roleplay_user_id = self._roleplay_user_id(user_id)
         roleplay_session_id = self._roleplay_session_id(session_id)
-        system_prompt = self._user_cache.get_roleplay_prompt(user_id)
-
         memory_manager = await self._get_roleplay_memory_manager(user_id)
-        history: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        history: List[Dict[str, Any]] = []
 
         if memory_manager:
             try:
@@ -1086,15 +1245,12 @@ class Bot:
                     if str(item.get("summary") or "").strip()
                 ]
                 if summary_lines:
-                    history[0]["content"] += (
-                        "\n\n以下是这段情景演绎的中期回忆摘要，只用于保持剧情连续，不要逐条复述：\n"
-                        + "\n".join(f"- {line}" for line in summary_lines)
-                    )
+                    history.append({
+                        "role": "assistant",
+                        "content": "[情景回顾]\n" + "\n".join(f"- {line}" for line in summary_lines),
+                    })
             except Exception as e:
                 print(f"情景演绎中期记忆注入失败: {e}")
-
-        if message is not None:
-            history.append({"role": "user", "content": message})
 
         return history, memory_manager, roleplay_user_id, roleplay_session_id
 
@@ -1109,7 +1265,16 @@ class Bot:
             session_id=session_id,
             message=message,
         )
-        response = await provider.chat(self._to_llm_messages(history))
+        rendered = self._render_roleplay_prompt(
+            user_id=user_id,
+            history_messages=history,
+            message=message,
+        )
+        response = await invoke_provider_chat(
+            provider,
+            rendered.messages,
+            prompt_trace=rendered.trace,
+        )
 
         if memory_manager:
             try:
@@ -1137,7 +1302,16 @@ class Bot:
             user_id=user_id,
             session_id=session_id,
         )
-        response = await provider.chat(self._to_llm_messages(history))
+        rendered = self._render_roleplay_prompt(
+            user_id=user_id,
+            history_messages=history,
+            message=None,
+        )
+        response = await invoke_provider_chat(
+            provider,
+            rendered.messages,
+            prompt_trace=rendered.trace,
+        )
 
         if memory_manager:
             try:
@@ -1170,7 +1344,16 @@ class Bot:
         )
 
         full_response = ""
-        async for chunk in provider.chat_stream(self._to_llm_messages(history)):
+        rendered = self._render_roleplay_prompt(
+            user_id=user_id,
+            history_messages=history,
+            message=message,
+        )
+        async for chunk in invoke_provider_chat_stream(
+            provider,
+            rendered.messages,
+            prompt_trace=rendered.trace,
+        ):
             full_response += chunk
             yield chunk
 
@@ -1220,16 +1403,24 @@ class Bot:
                 relevant_memories = await self._get_relevant_memories(user_id, message)
 
             # 使用 ContextBuilder 构建增强的对话历史
-            enhanced_history = await self._context_builder.build(
+            build_result = await self._context_builder.build(
                 message=message,
                 user_id=user_id,
                 session_id=session_id,
                 history=history,
                 relevant_memories=relevant_memories,
             )
+            rendered = self._render_standard_prompt(
+                user_id=user_id,
+                build_result=build_result,
+            )
 
             # 调用LLM API（使用增强的历史）
-            response = await provider.chat(self._to_llm_messages(enhanced_history))
+            response = await invoke_provider_chat(
+                provider,
+                rendered.messages,
+                prompt_trace=rendered.trace,
+            )
             
             # 记录到当前会话的基础对话历史（不包含扩展上下文）
             now_ts = get_now().isoformat()
@@ -1367,7 +1558,7 @@ class Bot:
             mark("relevant_memories_loaded")
 
             # 使用 ContextBuilder 构建增强的对话历史
-            enhanced_history = await self._context_builder.build(
+            build_result = await self._context_builder.build(
                 message=message,
                 user_id=user_id,
                 session_id=session_id,
@@ -1388,7 +1579,15 @@ class Bot:
             full_response = ""
             first_chunk_seen = False
             mark("llm_stream_start")
-            async for chunk in provider.chat_stream(self._to_llm_messages(enhanced_history)):
+            rendered = self._render_standard_prompt(
+                user_id=user_id,
+                build_result=build_result,
+            )
+            async for chunk in invoke_provider_chat_stream(
+                provider,
+                rendered.messages,
+                prompt_trace=rendered.trace,
+            ):
                 if chunk is None:
                     continue
                 if not first_chunk_seen:
@@ -1516,15 +1715,25 @@ class Bot:
                 relevant_memories = await self._get_relevant_memories(user_id, instruction)
 
             # 使用 ContextBuilder 构建增强的对话历史
-            enhanced_history = await self._context_builder.build(
+            build_result = await self._context_builder.build(
                 message=instruction,
                 user_id=user_id,
                 session_id=session_id,
                 history=history,
                 relevant_memories=relevant_memories,
             )
+            rendered = self._render_standard_prompt(
+                user_id=user_id,
+                build_result=build_result,
+                task_content="输出一条主动发起的消息，保持自然，不要解释系统行为。",
+                input_title="主动消息触发说明",
+            )
 
-            response = await provider.chat(self._to_llm_messages(enhanced_history))
+            response = await invoke_provider_chat(
+                provider,
+                rendered.messages,
+                prompt_trace=rendered.trace,
+            )
             response = await self._maybe_execute_im_actions(
                 response,
                 user_id=user_id,

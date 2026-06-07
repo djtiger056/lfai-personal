@@ -21,7 +21,13 @@ def _trace_dir() -> Path:
     return trace_dir
 
 
-def record_payload(provider: str, model: str, messages: List[Dict[str, Any]], extra: Optional[Dict[str, Any]] = None):
+def record_payload(
+    provider: str,
+    model: str,
+    messages: List[Dict[str, Any]],
+    extra: Optional[Dict[str, Any]] = None,
+    prompt_trace: Optional[Dict[str, Any]] = None,
+):
     """落盘最终发送给 LLM 的 messages，便于审计"""
     if not _TRACE_ENABLED:
         return
@@ -35,6 +41,8 @@ def record_payload(provider: str, model: str, messages: List[Dict[str, Any]], ex
     }
     if extra:
         payload["extra"] = extra
+    if prompt_trace:
+        payload["prompt_trace"] = deepcopy(prompt_trace)
 
     line = json.dumps(payload, ensure_ascii=False)
     trace_path = _trace_dir() / f"{get_now():%Y%m%d}.log"

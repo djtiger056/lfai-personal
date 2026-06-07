@@ -7,6 +7,7 @@ import json
 import re
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+from backend.prompt_assembly import PromptAssembler, PromptBlueprint, invoke_provider_chat
 from backend.utils.datetime_utils import get_now
 
 # 尝试使用 zoneinfo，如果不可用则使用 pytz 或本地时间
@@ -76,6 +77,7 @@ class ReminderDetector:
         self.provider = provider
         self.timezone = get_timezone(timezone)
         self.enable_llm_fallback = enable_llm_fallback
+        self._prompt_assembler = PromptAssembler()
         
         # 时间表达式映射
         self.time_patterns = {
@@ -276,14 +278,46 @@ class ReminderDetector:
     
     async def _detect_with_llm(self, message: str) -> Optional[Dict[str, Any]]:
         """使用LLM检测待办事项意图"""
-        # 构建检测提示词
-        prompt = self._build_detection_prompt(message)
-        
-        # 调用LLM进行意图检测
-        response = await self.provider.chat([
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": message}
-        ])
+        prompt = self._build_detection_prompt()
+        rendered = self._prompt_assembler.render_messages(
+            PromptBlueprint(name="reminder_detection_v2"),
+            [
+                self._prompt_assembler.make_identity_block(
+                    block_id="reminder_role",
+                    title="角色定位",
+                    content="你是一个待办事项意图检测助手。",
+                    stability="static",
+                ),
+                self._prompt_assembler.make_behavior_block(
+                    block_id="reminder_rules",
+                    title="输出原则",
+                    rules=[
+                        "只基于用户输入判断是否存在提醒意图。",
+                        "输出必须是单个 JSON 对象。",
+                        "没有足够信息时返回 is_reminder=false。",
+                    ],
+                    stability="static",
+                ),
+                self._prompt_assembler.make_task_block(
+                    block_id="reminder_task",
+                    title="输出目标",
+                    content=prompt,
+                    stability="turn",
+                ),
+                self._prompt_assembler.make_input_block(
+                    block_id="reminder_input",
+                    title="用户消息",
+                    content=message,
+                    stability="turn",
+                ),
+            ],
+        )
+
+        response = await invoke_provider_chat(
+            self.provider,
+            rendered.messages,
+            prompt_trace=rendered.trace,
+        )
         
         # 解析LLM响应
         result = self._parse_llm_response(response)
@@ -306,7 +340,7 @@ class ReminderDetector:
         
         return None
     
-    def _build_detection_prompt(self, message: str) -> str:
+    def _build_detection_prompt(self) -> str:
         """构建意图检测提示词"""
         return """你是一个待办事项意图检测助手。请分析用户的消息，判断是否包含待办事项/提醒意图。
 
