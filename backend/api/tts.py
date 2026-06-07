@@ -80,15 +80,14 @@ QWEN_VOICE_SAMPLE_DIR = Path("data/tts/qwen_voice_samples")
 
 
 def _load_config_file() -> Dict[str, Any]:
-    config_path = Path("config.yaml")
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(app_config.config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
 def _save_config_file(config: Dict[str, Any]) -> None:
-    config_path = Path("config.yaml")
-    with open(config_path, "w", encoding="utf-8") as f:
+    with open(app_config.config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+    app_config.refresh_from_file()
 
 
 def _get_qwen_cfg(config: Dict[str, Any]) -> Dict[str, Any]:

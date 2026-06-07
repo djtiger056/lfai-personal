@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select
 from sqlalchemy import func
 from backend.utils.datetime_utils import get_now, to_isoformat, ensure_timezone
+from backend.utils.companion_identity import normalize_companion_memory_scope
 
 from .models import (
     MemoryConfig, MemoryItemDB, MemorySummaryDB,
@@ -63,6 +64,10 @@ class BaseMemoryManager(ABC):
         # 会话级锁与后台摘要任务
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._pending_summary_tasks: Dict[str, asyncio.Task] = {}
+
+    @staticmethod
+    def _normalize_memory_scope(user_id: str, session_id: Optional[str] = None) -> tuple[str, str]:
+        return normalize_companion_memory_scope(user_id, session_id)
 
     @abstractmethod
     async def initialize(self):
@@ -224,6 +229,8 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return False
 
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
                 # 递增并持久化会话游标（避免重启后轮次/摘要错乱）
@@ -361,6 +368,8 @@ class BaseMemoryManager(ABC):
         if self.async_session is None or not self.config.short_term_enabled:
             return
 
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
+
         keep_messages = self._effective_keep_rounds() * 2
 
         async with self.async_session() as session:
@@ -402,6 +411,7 @@ class BaseMemoryManager(ABC):
         """获取待处理区原文（用于调试/可视化）"""
         if self.async_session is None:
             return []
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
         cache_key = self._make_cache_key("pending", user_id, session_id, limit)
         cached = self._get_cache(cache_key)
         if cached is not None:
@@ -432,6 +442,7 @@ class BaseMemoryManager(ABC):
 
     async def summarize_pending_now(self, user_id: str, session_id: str, force: bool = True) -> Dict[str, Any]:
         """手动触发：摘要待处理区（默认强制处理不足一个chunk的剩余内容）"""
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
         if not getattr(self.config, "pipeline_enabled", False):
             return {
                 "ok": False,
@@ -462,6 +473,8 @@ class BaseMemoryManager(ABC):
         """恢复异常残留的 pending_processing 为 pending（用于手动修复）"""
         if self.async_session is None:
             return 0
+
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
 
         recovered = 0
         async with self.async_session() as session:
@@ -494,6 +507,8 @@ class BaseMemoryManager(ABC):
         }
         if self.async_session is None:
             return result_info
+
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
 
         lock = self._get_session_lock(user_id, session_id)
         async with lock:
@@ -763,6 +778,8 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return []
 
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
+
         # 尝试从缓存获取
         cache_key = self._make_cache_key("short_term", user_id, session_id, limit)
         cached_result = self._get_cache(cache_key)
@@ -807,13 +824,18 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return False
 
+        normalized_user_id = str(user_id or "").strip()
+        normalized_session_id = None
+        if session_id:
+            normalized_user_id, normalized_session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
-                stmt = select(MemoryItemDB).where(MemoryItemDB.user_id == user_id).where(
+                stmt = select(MemoryItemDB).where(MemoryItemDB.user_id == normalized_user_id).where(
                     MemoryItemDB.memory_type.in_(["short_term", "pending", "pending_processing", "archived"])
                 )
-                if session_id:
-                    stmt = stmt.where(MemoryItemDB.session_id == session_id)
+                if normalized_session_id:
+                    stmt = stmt.where(MemoryItemDB.session_id == normalized_session_id)
                 result = await session.execute(stmt)
                 memories = result.scalars().all()
 
@@ -821,9 +843,9 @@ class BaseMemoryManager(ABC):
                     await session.delete(mem)
 
                 # 清理会话游标（避免下次从旧计数继续）
-                state_stmt = select(MemorySessionStateDB).where(MemorySessionStateDB.user_id == user_id)
-                if session_id:
-                    state_stmt = state_stmt.where(MemorySessionStateDB.session_id == session_id)
+                state_stmt = select(MemorySessionStateDB).where(MemorySessionStateDB.user_id == normalized_user_id)
+                if normalized_session_id:
+                    state_stmt = state_stmt.where(MemorySessionStateDB.session_id == normalized_session_id)
                 state_result = await session.execute(state_stmt)
                 states = state_result.scalars().all()
                 for st in states:
@@ -832,12 +854,12 @@ class BaseMemoryManager(ABC):
                 await session.commit()
 
                 # 清缓存
-                if session_id:
-                    self._clear_cache(f"short_term:{user_id}:{session_id}")
-                    self._clear_cache(f"pending:{user_id}:{session_id}")
+                if normalized_session_id:
+                    self._clear_cache(f"short_term:{normalized_user_id}:{normalized_session_id}")
+                    self._clear_cache(f"pending:{normalized_user_id}:{normalized_session_id}")
                 else:
-                    self._clear_cache(f"short_term:{user_id}")
-                    self._clear_cache(f"pending:{user_id}")
+                    self._clear_cache(f"short_term:{normalized_user_id}")
+                    self._clear_cache(f"pending:{normalized_user_id}")
                 return True
         except Exception as e:
             print(f"清除短期记忆失败: {e}")
@@ -847,6 +869,7 @@ class BaseMemoryManager(ABC):
 
     async def _check_and_generate_summary(self, session_id: str, user_id: str):
         """检查并生成对话摘要"""
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
         # 新流水线下，中期摘要由“待处理区批量摘要”产生，这里直接跳过旧逻辑
         if getattr(self.config, "pipeline_enabled", False):
             return
@@ -869,6 +892,8 @@ class BaseMemoryManager(ABC):
         """生成对话摘要（优化版 - 智能提取关键信息）"""
         if self.async_session is None:
             return
+
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
 
         try:
             # 获取需要摘要的对话范围
@@ -1097,6 +1122,9 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return []
 
+        if session_id:
+            user_id, session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
                 stmt = select(MemorySummaryDB).where(
@@ -1118,6 +1146,8 @@ class BaseMemoryManager(ABC):
         """清理旧摘要"""
         if self.async_session is None:
             return
+
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
 
         try:
             async with self.async_session() as session:
@@ -1145,6 +1175,7 @@ class BaseMemoryManager(ABC):
 
     async def _get_session_state(self, session_id: str, user_id: str) -> Dict[str, Any]:
         """获取会话状态"""
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
         key = f"{user_id}_{session_id}"
         if key not in self.session_states:
             state = {
@@ -1314,6 +1345,8 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return False
 
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
                 reminder = ReminderItemDB(
@@ -1413,14 +1446,19 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return []
 
+        normalized_user_id = str(user_id or "").strip() if user_id else None
+        normalized_session_id = str(session_id or "").strip() if session_id else None
+        if user_id and session_id:
+            normalized_user_id, normalized_session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
                 stmt = select(ReminderItemDB)
 
-                if user_id:
-                    stmt = stmt.where(ReminderItemDB.user_id == user_id)
-                if session_id:
-                    stmt = stmt.where(ReminderItemDB.session_id == session_id)
+                if normalized_user_id:
+                    stmt = stmt.where(ReminderItemDB.user_id == normalized_user_id)
+                if normalized_session_id:
+                    stmt = stmt.where(ReminderItemDB.session_id == normalized_session_id)
                 if status:
                     stmt = stmt.where(ReminderItemDB.status == status)
 
@@ -1501,6 +1539,8 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return 0
 
+        user_id, session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
                 # 批量创建记忆项
@@ -1566,14 +1606,19 @@ class BaseMemoryManager(ABC):
         if self.async_session is None:
             return 0
 
+        normalized_user_id = str(user_id or "").strip()
+        normalized_session_id = None
+        if session_id:
+            normalized_user_id, normalized_session_id = self._normalize_memory_scope(user_id, session_id)
+
         try:
             async with self.async_session() as session:
                 stmt = select(MemoryItemDB).where(
-                    MemoryItemDB.user_id == user_id,
+                    MemoryItemDB.user_id == normalized_user_id,
                     MemoryItemDB.memory_type == "short_term"
                 )
-                if session_id:
-                    stmt = stmt.where(MemoryItemDB.session_id == session_id)
+                if normalized_session_id:
+                    stmt = stmt.where(MemoryItemDB.session_id == normalized_session_id)
                 if before_date:
                     stmt = stmt.where(MemoryItemDB.created_at < before_date)
 
@@ -1588,10 +1633,10 @@ class BaseMemoryManager(ABC):
                 await session.commit()
 
                 # 清除相关缓存
-                if session_id:
-                    self._clear_cache(f"short_term:{user_id}:{session_id}")
+                if normalized_session_id:
+                    self._clear_cache(f"short_term:{normalized_user_id}:{normalized_session_id}")
                 else:
-                    self._clear_cache(f"short_term:{user_id}")
+                    self._clear_cache(f"short_term:{normalized_user_id}")
 
                 return count
         except Exception as e:

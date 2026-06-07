@@ -27,6 +27,7 @@ from ..core.gen_video_parser import extract_gen_video_prompt
 from ..core.tts_tag_parser import extract_tts_tag
 from ..utils.text_splitter import smart_split_text
 from ..voice_call import VoiceCallManager, VoiceCallConfig
+from ..utils.companion_identity import companion_session_id, companion_user_id
 from .debouncer import MessageDebouncer
 
 
@@ -50,10 +51,21 @@ class LinyuAdapter:
         # 账号配置
         self.account = self.linyu_config.get("account", "")
         self.password = self.linyu_config.get("password", "")
-        self.target_user_id = str(self.linyu_config.get("target_user_id", "")).strip()
-        self.target_user_account = str(self.linyu_config.get("target_user_account", "")).strip()
-        self.auto_bind_first_user = bool(self.linyu_config.get("auto_bind_first_user", False))
-        self._has_explicit_target = bool(self.target_user_id or self.target_user_account)
+        self.companion_id = str(self.linyu_config.get("_companion_id") or self.owner_user_id or "").strip()
+        self.companion_name = str(self.linyu_config.get("_companion_name") or "").strip()
+        self.ai_account_id = str(self.linyu_config.get("_ai_account_id") or "").strip()
+        self.ai_account_name = str(self.linyu_config.get("_ai_account_name") or self.account or "").strip()
+        self.bound_accounts = [
+            item for item in self.linyu_config.get("_bound_accounts", [])
+            if isinstance(item, dict)
+        ]
+        self.allowed_user_ids = {
+            str(item).strip()
+            for item in self.linyu_config.get("_allowed_user_ids", [])
+            if str(item).strip()
+        }
+        self.target_user_id = str(self.linyu_config.get("_target_user_id", "")).strip()
+        self.target_display_name = str(self.linyu_config.get("_target_display_name", "")).strip()
 
         # 访问控制配置
         self.access_control_config = self.linyu_config.get("access_control", {})
@@ -252,7 +264,6 @@ class LinyuAdapter:
         self.token = data.get("token")
         self.user_id = str(data.get("userId")) if data.get("userId") else None
         print("✅ Linyu 登录成功")
-        await self._resolve_target_user_id()
 
     async def _get_public_key(self) -> str:
         result = await self._request_json("GET", "/v1/api/login/public-key", with_token=False)
@@ -350,33 +361,29 @@ class LinyuAdapter:
         if self.user_id and user_id == str(self.user_id):
             return
 
-        # 尝试将 Linyu userId 与已绑定账号名的用户关联
+        allowed_user_ids = set(getattr(self, "allowed_user_ids", set()) or set())
+        if allowed_user_ids and user_id not in allowed_user_ids:
+            print(f"ℹ️ 忽略未绑定用户消息: {user_id} (companion={self.companion_name or self.companion_id})")
+            return
+
+        if not allowed_user_ids and self.target_user_id and user_id != self.target_user_id:
+            print(f"ℹ️ 忽略非目标用户消息: {user_id} (target={self.target_user_id})")
+            return
+
+        # 尝试将 Linyu userId 与账号管理中的聊天对象关联
         await self._try_resolve_linyu_binding(user_id)
         bound_user = await self._get_bound_linyu_user(user_id)
         if bound_user and getattr(bound_user, "id", None) is not None:
             if not hasattr(self, "_bound_bot_user_ids"):
                 self._bound_bot_user_ids = {}
-            self._bound_bot_user_ids[user_id] = str(bound_user.id)
-        self._grant_bound_user_whitelist_access(user_id, bound_user)
+            self._bound_bot_user_ids[user_id] = self._get_companion_user_id()
+            if self.access_control_enabled and self.access_control_mode == "whitelist":
+                self.access_whitelist.add(user_id)
 
         # 获取消息ID用于去重
         msg_id = str(message.get("id") or message.get("msgId") or message.get("msg_id") or "")
         if msg_id and self._is_message_processed(msg_id):
             print(f"⚠️ 跳过重复消息: {msg_id}")
-            return
-
-        # 单用户模式目标限制
-        if not self.target_user_id and self.auto_bind_first_user:
-            has_explicit_binding = await self._has_any_explicit_linyu_binding()
-            if not has_explicit_binding:
-                self.target_user_id = user_id
-                if self.access_control_enabled and self.access_control_mode == "whitelist":
-                    self.access_whitelist.add(user_id)
-                print(f"✅ 自动绑定首个用户为目标: {user_id}")
-
-        allow_bound_user_override = self._should_allow_bound_user_target_override(bound_user)
-        if self.target_user_id and user_id != self.target_user_id and not allow_bound_user_override:
-            print(f"ℹ️ 忽略非目标用户消息: {user_id} (target={self.target_user_id})")
             return
 
         # 访问控制
@@ -535,7 +542,7 @@ class LinyuAdapter:
             bot_user_id = self._get_bot_user_id(user_id)
             session_id = self._get_bot_session_id(user_id)
             print(f"🔎 Linyu 运行身份: sender={user_id}, bot_user_id={bot_user_id}, session_id={session_id}")
-            proactive_api.record_user_activity("linyu_private", user_id, user_id, text_content)
+            proactive_api.record_user_activity("linyu_private", user_id, session_id, text_content)
             roleplay_mode = await self._is_roleplay_mode(bot_user_id)
             voice_only = self.bot.is_voice_only_mode(bot_user_id)
             if roleplay_mode:
@@ -554,7 +561,7 @@ class LinyuAdapter:
                     session_id=session_id,
                     emit_text=not voice_only,
                 )
-            proactive_api.record_assistant_activity("linyu_private", user_id, user_id, response)
+            proactive_api.record_assistant_activity("linyu_private", user_id, session_id, response)
             log_response = response[:200] + "..." if len(response) > 200 else response
             print(f"🤖 Linyu AI回复 -> {user_id}: {log_response}")
             if self.bot.pop_last_mode_command(bot_user_id, session_id):
@@ -666,22 +673,25 @@ class LinyuAdapter:
             user_message_parts.append(f"{instruction_text}\n\n{recognition_text}")
             user_message = "\n\n".join(user_message_parts)
 
-            proactive_api.record_user_activity("linyu_private", user_id, user_id, user_message)
+            bot_user_id = self._get_bot_user_id(user_id)
+            session_id = self._get_bot_session_id(user_id)
+            proactive_api.record_user_activity("linyu_private", user_id, session_id, user_message)
             llm_response = await self._stream_reply_by_sentence(
                 user_id=user_id,
                 prompt=user_message,
-                session_id=user_id,
+                bot_user_id=bot_user_id,
+                session_id=session_id,
             )
-            proactive_api.record_assistant_activity("linyu_private", user_id, user_id, llm_response)
+            proactive_api.record_assistant_activity("linyu_private", user_id, session_id, llm_response)
 
             audio_data = None
             try:
-                audio_data = await self.bot.synthesize_speech(llm_response, user_id=user_id)
+                audio_data = await self.bot.synthesize_speech(llm_response, user_id=bot_user_id)
             except Exception as e:
                 print(f"❌ TTS合成失败: {str(e)}")
 
             if audio_data:
-                tts_text = self.bot.get_last_tts_text(user_id=user_id)
+                tts_text = self.bot.get_last_tts_text(user_id=bot_user_id)
                 await self.send_voice_message(user_id, audio_data, speech_text=tts_text)
 
         except Exception as e:
@@ -728,7 +738,7 @@ class LinyuAdapter:
 
             bot_user_id = self._get_bot_user_id(user_id)
             session_id = self._get_bot_session_id(user_id)
-            proactive_api.record_user_activity("linyu_private", user_id, user_id, transcription_text)
+            proactive_api.record_user_activity("linyu_private", user_id, session_id, transcription_text)
             voice_only = self.bot.is_voice_only_mode(bot_user_id)
             llm_response = await self._stream_reply_by_sentence(
                 user_id=user_id,
@@ -737,7 +747,7 @@ class LinyuAdapter:
                 session_id=session_id,
                 emit_text=not voice_only,
             )
-            proactive_api.record_assistant_activity("linyu_private", user_id, user_id, llm_response)
+            proactive_api.record_assistant_activity("linyu_private", user_id, session_id, llm_response)
 
             if self.bot.pop_last_mode_command(bot_user_id, session_id):
                 if voice_only and llm_response:
@@ -1011,6 +1021,10 @@ class LinyuAdapter:
 
     def _get_bot_user_id(self, linyu_user_id: str) -> str:
         """返回该 Linyu 会话应使用的系统内用户 ID。"""
+        companion_user_id = self._get_companion_user_id()
+        if companion_user_id:
+            return companion_user_id
+
         owner_user_id = str(getattr(self, "owner_user_id", "") or "").strip()
         if owner_user_id and owner_user_id != "global":
             return owner_user_id
@@ -1019,7 +1033,20 @@ class LinyuAdapter:
 
     def _get_bot_session_id(self, linyu_user_id: str) -> str:
         """为该 Linyu 对话生成稳定的 Bot 会话 ID。"""
+        ai_account_id = str(getattr(self, "ai_account_id", "") or "").strip()
+        if ai_account_id:
+            return companion_session_id(ai_account_id, "linyu", str(linyu_user_id))
         return f"linyu_private:{str(linyu_user_id)}"
+
+    def _get_companion_user_id(self) -> str:
+        """返回伴侣级 Bot 身份，用于隔离人设、记忆与资源缓存。"""
+        companion_id = str(getattr(self, "companion_id", "") or "").strip()
+        if companion_id:
+            return companion_id
+        ai_account_id = str(getattr(self, "ai_account_id", "") or "").strip()
+        if ai_account_id:
+            return companion_user_id(ai_account_id)
+        return ""
 
     async def _is_roleplay_mode(self, user_id: str) -> bool:
         checker = getattr(self.bot, "is_roleplay_mode", None)
@@ -1896,14 +1923,19 @@ class LinyuAdapter:
     def get_runtime_status(self) -> Dict[str, Any]:
         return {
             "owner_user_id": self.owner_user_id,
+            "companion_id": self._get_companion_user_id(),
+            "companion_name": self.companion_name,
+            "ai_account_id": self.ai_account_id,
+            "ai_account_name": self.ai_account_name,
             "enabled": bool(self.account and self.password),
             "running": self.running,
             "connected": self.websocket is not None,
             "login_account": self.account,
             "self_user_id": self.user_id,
             "target_user_id": self.target_user_id,
-            "target_user_account": self.target_user_account,
-            "auto_bind_first_user": self.auto_bind_first_user,
+            "target_display_name": self.target_display_name,
+            "allowed_user_ids": sorted(self.allowed_user_ids),
+            "bound_accounts": self.bound_accounts,
             "reconnect_attempts": self.reconnect_attempts,
             "last_started_at": datetime.fromtimestamp(self.last_started_at).isoformat() if self.last_started_at else None,
             "last_connected_at": datetime.fromtimestamp(self.last_connected_at).isoformat() if self.last_connected_at else None,
@@ -1952,43 +1984,6 @@ class LinyuAdapter:
     def _auth_headers(self) -> Dict[str, str]:
         return {"x-token": self.token} if self.token else {}
 
-    async def _resolve_target_user_id(self):
-        # 如果配置的是账号，则通过接口解析到 userId
-        account = self.target_user_account
-        if not account and self.target_user_id and not self._looks_like_uuid(self.target_user_id):
-            account = self.target_user_id
-
-        if not account:
-            return
-
-        resolved = await self._resolve_user_id_by_account(account)
-        if resolved:
-            self.target_user_id = resolved
-            if self.access_control_enabled and self.access_control_mode == "whitelist":
-                self.access_whitelist.add(resolved)
-            print(f"✅ 已解析账号 {account} -> userId {resolved}")
-        else:
-            print(f"⚠️ 未能通过账号解析 userId: {account}，请检查账号是否正确")
-
-    async def _resolve_user_id_by_account(self, account: str) -> Optional[str]:
-        try:
-            payload = {"userInfo": account}
-            result = await self._request_json("POST", "/v1/api/user/search", json_data=payload)
-            data = result.get("data") if isinstance(result, dict) else None
-            if isinstance(data, list):
-                for item in data:
-                    if not isinstance(item, dict):
-                        continue
-                    if str(item.get("account", "")) == account:
-                        return str(item.get("id") or item.get("userId") or "")
-                if len(data) == 1 and isinstance(data[0], dict):
-                    return str(data[0].get("id") or data[0].get("userId") or "")
-            elif isinstance(data, dict):
-                return str(data.get("id") or data.get("userId") or "")
-        except Exception as e:
-            print(f"⚠️ 账号解析失败: {str(e)}")
-        return None
-
     @staticmethod
     def _looks_like_uuid(value: str) -> bool:
         if not value:
@@ -1996,82 +1991,46 @@ class LinyuAdapter:
         return bool(len(value) == 36 and value.count("-") == 4)
 
     async def _try_resolve_linyu_binding(self, linyu_user_id: str):
-        """如果数据库中有用户绑定了账号名（非UUID），尝试通过 Linyu API 查询该 userId 对应的 account，
-        然后将数据库中按账号名绑定的记录更新为真实的 userId。
-        
-        这样用户绑定时输入账号名即可，首次收到消息时自动修正为 UUID。
-        只在首次需要时执行，之后直接命中缓存。
-        """
-        from ..user import user_manager
+        """Register Linyu chat identities in the personal account registry."""
+        from ..accounts import account_registry
 
-        # 如果已经能按 userId 找到用户，无需解析
-        existing = await user_manager.get_user_by_linyu_id(linyu_user_id)
+        existing = account_registry.get_account_by_remote_id("linyu", linyu_user_id)
         if existing:
             return
 
-        # userId 是 UUID 格式，尝试查询对应的账号名
+        display_name = ""
         if not self._looks_like_uuid(linyu_user_id):
-            return
+            display_name = linyu_user_id
+        else:
+            try:
+                display_name = await self._get_account_by_user_id(linyu_user_id) or ""
+            except Exception:
+                display_name = ""
 
         try:
-            account = await self._get_account_by_user_id(linyu_user_id)
-            if not account:
-                return
-
-            # 查找是否有用户绑定了这个账号名
-            user_by_account = await user_manager.get_user_by_linyu_account(account)
-            if user_by_account:
-                # 将账号名更新为真实的 userId，同时保留账号名用于显示
-                await user_manager.update_user(
-                    user_id=user_by_account.id,
-                    linyu_user_id=linyu_user_id,
-                    linyu_account=account
-                )
-                print(f"✅ 自动更新 Linyu 绑定: {account} -> {linyu_user_id}")
-        except Exception as e:
-            # 解析失败不影响正常消息处理
-            pass
+            account_registry.upsert_account(
+                platform="linyu",
+                account_name=display_name or linyu_user_id,
+                remote_user_id=linyu_user_id,
+                display_name=display_name or linyu_user_id,
+                enabled=True,
+                metadata={},
+            )
+        except Exception:
+            return
 
     async def _get_bound_linyu_user(self, linyu_user_id: str):
-        from ..user import user_manager
-        try:
-            return await user_manager.get_user_by_linyu_id(linyu_user_id)
-        except Exception:
+        from types import SimpleNamespace
+        from ..accounts import account_registry
+
+        account = account_registry.get_account_by_remote_id("linyu", linyu_user_id)
+        if not account:
             return None
-
-    async def _has_any_explicit_linyu_binding(self) -> bool:
-        from ..user import user_manager
-        try:
-            return await user_manager.has_any_linyu_binding()
-        except Exception:
-            return False
-
-    def _should_allow_bound_user_target_override(self, bound_user: Optional[Any]) -> bool:
-        return bool(
-            bound_user
-            and self.auto_bind_first_user
-            and not self._has_explicit_target
+        return SimpleNamespace(
+            id=account.get("id"),
+            linyu_user_id=account.get("remote_user_id"),
+            linyu_account=account.get("display_name"),
         )
-
-    def _should_allow_bound_user_access(self, bound_user: Optional[Any]) -> bool:
-        owner_user_id = str(getattr(self, "owner_user_id", "") or "").strip()
-        return bool(
-            bound_user
-            and (not owner_user_id or owner_user_id == "global")
-            and not self._has_explicit_target
-        )
-
-    def _grant_bound_user_whitelist_access(self, user_id: str, bound_user: Optional[Any]):
-        if (
-            not (
-                self._should_allow_bound_user_target_override(bound_user)
-                or self._should_allow_bound_user_access(bound_user)
-            )
-            or not self.access_control_enabled
-            or self.access_control_mode != "whitelist"
-        ):
-            return
-        self.access_whitelist.add(user_id)
 
     async def _get_account_by_user_id(self, target_user_id: str) -> Optional[str]:
         """通过 Linyu API 查询用户 ID 对应的账号名"""
@@ -2099,8 +2058,6 @@ class LinyuAdapter:
         if not self.access_control_enabled:
             return True, ""
         if self.access_control_mode == "whitelist":
-            if not self.access_whitelist and self.target_user_id:
-                self.access_whitelist.add(self.target_user_id)
             if user_id in self.access_whitelist:
                 return True, ""
             return False, self.access_deny_message

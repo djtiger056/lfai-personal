@@ -312,7 +312,6 @@ class UserManager:
                 _KEY_MAP.get(k, k)
                 for k in config_data.keys()
             } >= {
-                'system_prompt',
                 'llm',
                 'tts',
                 'image_generation',
@@ -359,7 +358,6 @@ class UserManager:
             'emotes': 'emotes',
             'proactive_chat': 'proactive_chat',
             'adapters': 'adapters',
-            'system_prompt': 'system_prompt',
             'preferences': 'preferences',
         }
         for yaml_key, api_key in _YAML_TO_API.items():

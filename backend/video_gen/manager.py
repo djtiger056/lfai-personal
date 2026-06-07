@@ -72,7 +72,7 @@ class VideoGenerationManager:
             raise ValueError(f"不支持的视频生成提供商: {self.config.provider}")
 
         cfg = self.config.video_api
-        if cfg.use_async:
+        if cfg.use_async and self._provider_key() in {"jimeng", "international"}:
             return await self._generate_video_async(prompt, images=images)
         return await self._generate_video_sync(prompt, images=images)
 
@@ -83,31 +83,61 @@ class VideoGenerationManager:
             headers["x-api-key"] = api_key
         return headers
 
-    def _endpoint_path(self) -> str:
+    def _provider_key(self) -> str:
         cfg = self.config.video_api
         provider = str(cfg.provider or "").lower()
-        if provider == "doubao" or str(cfg.model).startswith("doubao-"):
+        model = str(cfg.model or "")
+        if provider in {"doubao", "qwen", "jimeng", "xyq", "international"}:
+            return provider
+        if model.startswith("doubao-"):
+            return "doubao"
+        if model.startswith(("wan", "qwen-")):
+            return "qwen"
+        if model.startswith("xyq-"):
+            return "xyq"
+        return "jimeng"
+
+    def _endpoint_path(self) -> str:
+        provider = self._provider_key()
+        if provider == "doubao":
             return "/v1/doubao/videos/generations"
-        if provider == "qwen" or str(cfg.model).startswith(("wan", "qwen-")):
+        if provider == "qwen":
             return "/v1/qwen/videos/generations"
+        if provider == "xyq":
+            return "/v1/xyq/videos/generations"
+        if provider == "international":
+            return "/v1/videos/international/generations"
         return "/v1/videos/generations"
 
     def _build_payload(self, prompt: str, images: Optional[List[str]] = None) -> Dict[str, Any]:
         cfg = self.config.video_api
+        provider = self._provider_key()
         payload: Dict[str, Any] = {
             "model": cfg.model,
             "prompt": prompt,
-            "response_format": "url",
+            "response_format": cfg.response_format or "url",
         }
         clean_images = [str(image).strip() for image in (images or []) if str(image or "").strip()]
         if clean_images:
-            payload["images"] = clean_images
+            if provider in {"jimeng", "international"}:
+                payload["file_paths"] = clean_images
+            else:
+                payload["images"] = clean_images
         if cfg.duration:
             payload["duration"] = cfg.duration
         if cfg.resolution:
             payload["resolution"] = cfg.resolution
         if cfg.ratio and not clean_images:
             payload["ratio"] = cfg.ratio
+        if cfg.poll_timeout_ms and provider == "doubao":
+            payload["poll_timeout_ms"] = cfg.poll_timeout_ms
+        if cfg.poll_interval_ms and provider == "doubao":
+            payload["poll_interval_ms"] = cfg.poll_interval_ms
+        if cfg.timeout_ms and provider in {"qwen", "xyq"}:
+            payload["timeout_ms"] = cfg.timeout_ms
+        provider_options = cfg.provider_options or {}
+        if isinstance(provider_options, dict):
+            payload.update({k: v for k, v in provider_options.items() if v not in (None, "")})
         return payload
 
     def _normalize_video_url(self, data: Any) -> Optional[str]:
@@ -156,7 +186,9 @@ class VideoGenerationManager:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             submit = await self._post_json(
                 session,
-                f"{base}/v1/videos/generations/async",
+                f"{base}/v1/videos/international/generations/async"
+                if self._provider_key() == "international"
+                else f"{base}/v1/videos/generations/async",
                 self._build_payload(prompt, images=images),
             )
             task_id = submit.get("taskId") or submit.get("task_id") or (submit.get("data") or {}).get("task_id")
@@ -172,7 +204,11 @@ class VideoGenerationManager:
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
                 async with session.get(
-                    f"{base}/v1/videos/generations/async/{task_id}",
+                    (
+                        f"{base}/v1/videos/international/generations/async/{task_id}"
+                        if self._provider_key() == "international"
+                        else f"{base}/v1/videos/generations/async/{task_id}"
+                    ),
                     headers=self._headers(),
                 ) as response:
                     data = await response.json(content_type=None)

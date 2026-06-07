@@ -3,9 +3,7 @@ from pydantic import BaseModel
 from typing import Any, Dict, Optional
 
 from ..core.bot import Bot
-from backend.api.deps import get_access_token
 from backend.api.bot_provider import get_bot
-from backend.user import auth_manager, user_manager
 
 
 router = APIRouter(prefix="/api/video-gen", tags=["视频生成"])
@@ -58,15 +56,9 @@ async def update_video_gen_config(
 async def generate_video(
     request: VideoGenRequest,
     bot: Bot = Depends(get_bot),
-    token: str = Depends(get_access_token),
 ):
     try:
         effective_user_id = request.user_id or "web_video_user"
-        if token:
-            user_info = auth_manager.get_user_from_token(token)
-            if user_info:
-                effective_user_id = str(user_info.get("user_id") or user_info.get("id") or effective_user_id)
-
         video_url = await bot.generate_video(request.prompt, user_id=effective_user_id)
         if video_url:
             return VideoGenResponse(success=True, message="视频生成成功", video_url=video_url)
@@ -78,20 +70,9 @@ async def generate_video(
 @router.post("/test-connection")
 async def test_connection(
     bot: Bot = Depends(get_bot),
-    token: str = Depends(get_access_token),
 ):
     try:
-        user_id = None
-        if token:
-            user_info = auth_manager.get_user_from_token(token)
-            if user_info:
-                current_user_id = user_info.get("user_id") or user_info.get("id")
-                if current_user_id:
-                    user = await user_manager.get_user_by_id(int(current_user_id))
-                    if not user or not getattr(user, "is_admin", 0):
-                        user_id = str(current_user_id)
-
-        success = await bot.test_video_gen_connection(user_id=user_id or None)
+        success = await bot.test_video_gen_connection(user_id=None)
         return {"success": success, "message": "连接成功" if success else "连接失败"}
     except Exception as e:
         return {"success": False, "message": f"连接测试失败：{str(e)}"}

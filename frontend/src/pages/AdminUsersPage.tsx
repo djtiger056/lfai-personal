@@ -20,6 +20,7 @@ type AdminUserSummary = {
   username: string
   nickname?: string
   qq_user_id?: string
+  linyu_user_id?: string
   is_active: number
   is_admin: number
   created_at: string
@@ -90,14 +91,36 @@ const AdminUsersPage: React.FC = () => {
     }
   }
 
-  const refreshLinyuSession = async (userId?: number) => {
+  const getLinyuSessionEntry = (user: AdminUserSummary): [string, any] | null => {
+    const legacyKey = String(user.id)
+    if (linyuSessions[legacyKey]) {
+      return [legacyKey, linyuSessions[legacyKey]]
+    }
+
+    const linyuUserId = String(user.linyu_user_id || '').trim()
+    if (!linyuUserId) {
+      return null
+    }
+
+    const matched = Object.entries(linyuSessions).find(([, session]) => {
+      const allowedUserIds = Array.isArray(session?.allowed_user_ids) ? session.allowed_user_ids : []
+      if (allowedUserIds.map((item: any) => String(item).trim()).includes(linyuUserId)) {
+        return true
+      }
+      const boundAccounts = Array.isArray(session?.bound_accounts) ? session.bound_accounts : []
+      return boundAccounts.some((account: any) => String(account?.remote_user_id || '').trim() === linyuUserId)
+    })
+    return matched || null
+  }
+
+  const refreshLinyuSession = async (ownerId?: string) => {
     try {
-      if (userId) {
-        await api.post(`/admin/linyu-sessions/${userId}/refresh`)
+      if (ownerId) {
+        await api.post(`/admin/linyu-sessions/${encodeURIComponent(ownerId)}/refresh`)
       } else {
         await api.post('/admin/linyu-sessions/refresh')
       }
-      message.success(userId ? `已提交用户 ${userId} 的 Linyu 会话热重载` : '已提交全部 Linyu 会话热重载')
+      message.success(ownerId ? `已提交 ${ownerId} 的 Linyu 会话热重载` : '已提交全部 Linyu 会话热重载')
       window.setTimeout(() => {
         loadLinyuSessions()
       }, 1200)
@@ -318,8 +341,9 @@ const AdminUsersPage: React.FC = () => {
                       title: 'Linyu 会话',
                       dataIndex: 'id',
                       width: 240,
-                      render: (id: number) => {
-                        const session = linyuSessions[String(id)]
+                      render: (_id: number, record: AdminUserSummary) => {
+                        const sessionEntry = getLinyuSessionEntry(record)
+                        const session = sessionEntry?.[1]
                         if (!session) {
                           return <Text type="secondary">未启用</Text>
                         }
@@ -330,11 +354,16 @@ const AdminUsersPage: React.FC = () => {
                               <Text>{session.connected ? '已连接' : (session.running ? '启动中' : '未连接')}</Text>
                             </Space>
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              AI: {session.login_account || '未配置'}
+                              伴侣: {session.companion_name || session.companion_id || '未配置'}
                             </Text>
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              对象: {session.target_user_account || session.target_user_id || '未配置'}
+                              Linyu: {session.ai_account_name || session.login_account || '未配置'}
                             </Text>
+                            {Array.isArray(session.bound_accounts) && session.bound_accounts.length > 0 ? (
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                用户: {session.bound_accounts.map((item: any) => item.display_name || item.account_name || item.remote_user_id).join('、')}
+                              </Text>
+                            ) : null}
                             {session.last_error ? (
                               <Tooltip title={session.last_error}>
                                 <Text type="danger" style={{ fontSize: 12 }}>最近错误</Text>
@@ -397,7 +426,13 @@ const AdminUsersPage: React.FC = () => {
                           </Button>
                           <Button
                             size="small"
-                            onClick={() => refreshLinyuSession(record.id)}
+                            disabled={!getLinyuSessionEntry(record)}
+                            onClick={() => {
+                              const sessionEntry = getLinyuSessionEntry(record)
+                              if (sessionEntry) {
+                                refreshLinyuSession(sessionEntry[0])
+                              }
+                            }}
                           >
                             重载 Linyu
                           </Button>
@@ -608,27 +643,6 @@ const AdminUsersPage: React.FC = () => {
             onChange={setActiveTab}
             items={[
               {
-                key: 'system_prompt',
-                label: '系统提示词',
-                children: (
-                  <div>
-                    <Form.Item name="system_prompt" label="自定义系统提示词">
-                      <TextArea
-                        rows={10}
-                        placeholder="留空使用全局默认提示词..."
-                      />
-                    </Form.Item>
-                    <Button 
-                      size="small" 
-                      icon={<ReloadOutlined />}
-                      onClick={() => resetConfigSection('system_prompt')}
-                    >
-                      重置为默认
-                    </Button>
-                  </div>
-                ),
-              },
-              {
                 key: 'llm',
                 label: 'LLM配置',
                 children: (
@@ -738,6 +752,9 @@ const AdminUsersPage: React.FC = () => {
                             <Option value="yunwu">云舞</Option>
                             <Option value="modelscope">魔搭社区</Option>
                             <Option value="kling_api">本地 kling-api</Option>
+                            <Option value="image_api">Image API</Option>
+                            <Option value="gpt_image">GPT-Image 中转站</Option>
+                            <Option value="gpt_image_edits">GPT-Image Edits</Option>
                           </Select>
                         </Form.Item>
                       </Col>
@@ -759,6 +776,9 @@ const AdminUsersPage: React.FC = () => {
                                   { value: 'yunwu', label: '云舞' },
                                   { value: 'modelscope', label: '魔搭社区' },
                                   { value: 'kling_api', label: '本地 kling-api' },
+                                  { value: 'image_api', label: 'Image API' },
+                                  { value: 'gpt_image', label: 'GPT-Image 中转站' },
+                                  { value: 'gpt_image_edits', label: 'GPT-Image Edits' },
                                 ].filter((item) => item.value !== getFieldValue(['image_generation', 'provider']))}
                               />
                             </Form.Item>
@@ -861,6 +881,116 @@ const AdminUsersPage: React.FC = () => {
                     <Form.Item name={['image_generation', 'kling_api', 'target_url']} label="目标页面地址">
                       <Input placeholder="https://klingai.com/app/image/new" allowClear />
                     </Form.Item>
+                    <Divider titlePlacement="left">Image API 配置</Divider>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'image_api', 'api_base']} label="Image API 地址">
+                          <Input placeholder="http://127.0.0.1:18081" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'image_api', 'api_key']} label="Image API Key">
+                          <Input.Password placeholder="未开启鉴权可留空" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'image_api', 'model']} label="Image API 模型">
+                          <Input placeholder="doubao-seedream-4.5" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'image_api', 'timeout']} label="Image API 超时（秒）">
+                          <Input type="number" placeholder="120" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'image_api', 'ratio']} label="Image API 比例">
+                          <Input placeholder="1:1 / 9:16 / 16:9" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'image_api', 'resolution']} label="Image API 分辨率">
+                          <Select allowClear options={[
+                            { value: '1k', label: '1K' },
+                            { value: '2k', label: '2K' },
+                            { value: '4k', label: '4K' },
+                          ]} />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Form.Item name={['image_generation', 'image_api', 'sample_strength']} label="Image API 图生图参考强度">
+                      <Input type="number" step="0.1" placeholder="0.5" allowClear />
+                    </Form.Item>
+                    <Divider titlePlacement="left">GPT-Image 中转站配置</Divider>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image', 'api_base']} label="GPT-Image 地址">
+                          <Input placeholder="https://your-proxy.com" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image', 'api_key']} label="GPT-Image API Key">
+                          <Input.Password placeholder="留空使用全局 API Key" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image', 'model']} label="GPT-Image 模型">
+                          <Input placeholder="gpt-image-2" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image', 'timeout']} label="GPT-Image 超时（秒）">
+                          <Input type="number" placeholder="180" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Divider titlePlacement="left">GPT-Image Edits 配置</Divider>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image_edits', 'api_base']} label="Edits API 地址">
+                          <Input placeholder="https://jeniya.top" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image_edits', 'api_key']} label="Edits API Key">
+                          <Input.Password placeholder="留空使用全局 API Key" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image_edits', 'model']} label="Edits 模型">
+                          <Input placeholder="gpt-image-2-all" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image_edits', 'timeout']} label="Edits 超时（秒）">
+                          <Input type="number" placeholder="180" allowClear />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={16}>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image_edits', 'ratio']} label="Edits 图片比例">
+                          <Input placeholder="1:1 / 9:16 / 16:9" allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name={['image_generation', 'gpt_image_edits', 'resolution']} label="Edits 分辨率">
+                          <Select allowClear options={[
+                            { value: '1k', label: '1K' },
+                            { value: '2k', label: '2K' },
+                            { value: '4k', label: '4K' },
+                          ]} />
+                        </Form.Item>
+                      </Col>
+                    </Row>
                     <Divider titlePlacement="left">触发与提示文案</Divider>
                     <Form.Item name={['image_generation', 'trigger_keywords']} label="触发关键词">
                       <Select mode="tags" placeholder="输入关键词后回车" allowClear />

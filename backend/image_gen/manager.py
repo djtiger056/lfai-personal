@@ -9,7 +9,7 @@ from .providers.modelscope import ModelScopeProvider
 from .providers.yunwu import YunwuProvider
 from .providers.image_api import ImageApiProvider
 from .providers.gpt_image import GptImageProvider
-from backend.user.data_manager import user_data_manager
+from .providers.gpt_image_edits import GptImageEditsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,10 @@ class ImageGenerationManager:
         "kling_api": (KlingApiProvider, "kling_api"),
         "image_api": (ImageApiProvider, "image_api"),
         "gpt_image": (GptImageProvider, "gpt_image"),
+        "gpt_image_edits": (GptImageEditsProvider, "gpt_image_edits"),
     }
+
+    IMAGE_EDIT_ONLY_PROVIDERS = {"gpt_image", "gpt_image_edits"}
 
     def __init__(self, config: ImageGenerationConfig):
         self.config = config
@@ -38,7 +41,6 @@ class ImageGenerationManager:
 
         # 初始化底图管理服务（用于图生图自动触发）
         self.base_image_service = BaseImageService(
-            user_data_manager=user_data_manager,
             fallback_image_path=self.config.default_base_image_path,
         )
 
@@ -64,7 +66,6 @@ class ImageGenerationManager:
 
         # 重新创建底图服务（配置可能变更了 default_base_image_path）
         self.base_image_service = BaseImageService(
-            user_data_manager=user_data_manager,
             fallback_image_path=self.config.default_base_image_path,
         )
 
@@ -118,25 +119,28 @@ class ImageGenerationManager:
 
         降级链：
         - provider == "image_api" 且 user_id 有效：I2I → T2I (same provider) → fallback → None
-        - provider == "gpt_image" 且 user_id 有效：I2I → fallback → None（不支持文生图）
+        - provider 为 GPT-Image 图生图提供商且 user_id 有效：I2I → fallback → None（不支持文生图）
         - 其他情况：T2I (primary) → fallback → None
         """
-        # 当 provider 为 gpt_image 时，仅支持图生图
-        if self.config.provider == "gpt_image" and user_id:
+        # GPT-Image 类编辑接口仅支持图生图
+        if self.config.provider in self.IMAGE_EDIT_ONLY_PROVIDERS and user_id:
             try:
                 base_image_url = await self.base_image_service.get_effective_base_image_data_url(user_id)
                 if base_image_url:
                     result = await self.primary_provider.generate_with_images(prompt, [base_image_url])
                     if result:
-                        logger.info(f"[ImageGen] gpt_image 图生图成功, user_id={user_id}")
+                        logger.info(f"[ImageGen] {self.config.provider} 图生图成功, user_id={user_id}")
                         return result
-                    logger.warning("[ImageGen] gpt_image 图生图返回空结果")
+                    logger.warning(f"[ImageGen] {self.config.provider} 图生图返回空结果")
                 else:
-                    logger.warning(f"[ImageGen] 用户 {user_id} 无可用底图, gpt_image 无法生成（仅支持图生图）")
+                    logger.warning(
+                        f"[ImageGen] 用户 {user_id} 无可用底图, "
+                        f"{self.config.provider} 无法生成（仅支持图生图）"
+                    )
             except Exception as e:
-                logger.warning(f"[ImageGen] gpt_image 图生图异常: {e}")
+                logger.warning(f"[ImageGen] {self.config.provider} 图生图异常: {e}")
 
-            # gpt_image 不支持文生图，直接尝试 fallback
+            # GPT-Image 编辑接口不支持文生图，直接尝试 fallback
             if self.config.enable_fallback and self.fallback_provider:
                 try:
                     result = await self.fallback_provider.generate(prompt)

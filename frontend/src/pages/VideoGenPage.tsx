@@ -36,6 +36,12 @@ interface VideoGenConfig {
     duration: number
     use_async: boolean
     poll_interval: number
+    response_format: string
+    poll_timeout_ms: number
+    poll_interval_ms: number
+    timeout_ms: number
+    provider_options: Record<string, any>
+    provider_options_text?: string
   }
   trigger_keywords: string[]
   prompt_instruction: string
@@ -48,7 +54,7 @@ const defaultConfig: VideoGenConfig = {
   enabled: false,
   provider: 'video_api',
   video_api: {
-    api_base: 'http://127.0.0.1:18080',
+    api_base: 'http://127.0.0.1:8006',
     api_key: '',
     provider: 'qwen',
     model: 'wan2.7-t2v',
@@ -58,6 +64,12 @@ const defaultConfig: VideoGenConfig = {
     duration: 5,
     use_async: false,
     poll_interval: 4,
+    response_format: 'url',
+    poll_timeout_ms: 600000,
+    poll_interval_ms: 4000,
+    timeout_ms: 420000,
+    provider_options: {},
+    provider_options_text: '',
   },
   trigger_keywords: ['生成视频', '做个视频', '做一段视频', '视频生成', '文生视频'],
   prompt_instruction:
@@ -69,15 +81,30 @@ const defaultConfig: VideoGenConfig = {
 
 const modelOptions = [
   'wan2.7-t2v',
-  'wan2.7-t2v-2026-04-25',
   'wan2.6-t2v',
   'qwen-happyhorse-1.0',
   'doubao-seedance-2.0-fast',
   'jimeng-video-3.5-pro',
-  'jimeng-video-3.0-pro',
   'jimeng-video-seedance-2.0',
   'jimeng-video-seedance-2.0-fast',
+  'xyq-seedance-2.0',
+  'xyq-seedance-2.0-fast',
 ]
+
+const stringifyJsonObject = (value: any) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  return JSON.stringify(value, null, 2)
+}
+
+const parseJsonObject = (value?: string) => {
+  const text = String(value || '').trim()
+  if (!text) return {}
+  const parsed = JSON.parse(text)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('额外参数必须是 JSON 对象')
+  }
+  return parsed
+}
 
 const VideoGenPage: React.FC = () => {
   const [form] = Form.useForm()
@@ -94,7 +121,15 @@ const VideoGenPage: React.FC = () => {
     try {
       setLoading(true)
       const data = await videoGenConfigProxy.getConfig()
-      const merged = { ...defaultConfig, ...(data || {}), video_api: { ...defaultConfig.video_api, ...(data?.video_api || {}) } }
+      const merged = {
+        ...defaultConfig,
+        ...(data || {}),
+        video_api: {
+          ...defaultConfig.video_api,
+          ...(data?.video_api || {}),
+          provider_options_text: stringifyJsonObject(data?.video_api?.provider_options),
+        },
+      }
       form.setFieldsValue(merged)
     } catch (error) {
       message.error('加载配置失败')
@@ -107,14 +142,24 @@ const VideoGenPage: React.FC = () => {
   const saveConfig = async (values: VideoGenConfig) => {
     try {
       setLoading(true)
-      await videoGenConfigProxy.updateConfig(values)
+      const payload: VideoGenConfig = {
+        ...values,
+        video_api: {
+          ...values.video_api,
+          provider_options: parseJsonObject(values.video_api?.provider_options_text),
+        },
+      }
+      delete payload.video_api.provider_options_text
+      await videoGenConfigProxy.updateConfig(payload)
       message.success('配置保存成功')
     } catch (error) {
-      message.error('配置保存失败')
+      message.error(error instanceof Error ? error.message : '配置保存失败')
     } finally {
       setLoading(false)
     }
   }
+
+  const currentProvider = Form.useWatch(['video_api', 'provider'], form) || defaultConfig.video_api.provider
 
   const testConnection = async () => {
     try {
@@ -169,7 +214,7 @@ const VideoGenPage: React.FC = () => {
               <Row gutter={16}>
                 <Col span={12}>
                   <Form.Item name={['video_api', 'api_base']} label="API 地址" rules={[{ required: true }]}>
-                    <Input placeholder="http://127.0.0.1:18080" />
+                    <Input placeholder="http://127.0.0.1:8006" />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
@@ -187,6 +232,8 @@ const VideoGenPage: React.FC = () => {
                         { value: 'qwen', label: 'Qwen / Wan' },
                         { value: 'doubao', label: 'Doubao Seedance' },
                         { value: 'jimeng', label: 'Jimeng' },
+                        { value: 'xyq', label: 'XYQ 小云雀' },
+                        { value: 'international', label: 'Jimeng 国际版' },
                       ]}
                     />
                   </Form.Item>
@@ -220,6 +267,51 @@ const VideoGenPage: React.FC = () => {
                   </Form.Item>
                 </Col>
               </Row>
+
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Form.Item name={['video_api', 'response_format']} label="响应格式">
+                    <Select options={['url', 'b64_json'].map(value => ({ value, label: value }))} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name={['video_api', 'timeout_ms']} label="Qwen/XYQ 超时（毫秒）">
+                    <InputNumber min={60000} max={1200000} step={10000} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name={['video_api', 'poll_timeout_ms']} label="Doubao 轮询超时（毫秒）">
+                    <InputNumber min={60000} max={1200000} step={10000} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Form.Item name={['video_api', 'poll_interval_ms']} label="Doubao 轮询间隔（毫秒）">
+                    <InputNumber min={500} max={60000} step={500} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={16}>
+                  <Form.Item
+                    name={['video_api', 'provider_options_text']}
+                    label="额外参数（JSON）"
+                    tooltip="透传到请求体的附加字段；普通场景留空即可"
+                  >
+                    <Input.TextArea rows={3} placeholder={'{\n  "custom_field": "value"\n}'} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              {currentProvider === 'doubao' || currentProvider === 'qwen' ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="参考图视频规则"
+                  description="系统使用用户视频底图生成图生视频时，后端会自动不传 ratio，由上游按首张参考图推断比例。"
+                />
+              ) : null}
 
               <Row gutter={16}>
                 <Col span={12}>

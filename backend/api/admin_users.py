@@ -49,7 +49,6 @@ class AdminUserConfigResponse(BaseModel):
 
 
 class AdminUpdateUserConfigRequest(BaseModel):
-    system_prompt: Optional[str] = None
     llm: Optional[Dict[str, Any]] = None
     tts: Optional[Dict[str, Any]] = None
     image_generation: Optional[Dict[str, Any]] = None
@@ -63,7 +62,6 @@ class AdminUpdateUserConfigRequest(BaseModel):
 
 def _build_global_config() -> Dict[str, Any]:
     return {
-        "system_prompt": global_config.system_prompt,
         "llm": global_config.llm_config,
         "tts": global_config.tts_config,
         "image_generation": global_config.image_gen_config.dict() if hasattr(global_config.image_gen_config, "dict") else {},
@@ -160,8 +158,6 @@ async def update_user_config(user_key: str, request: AdminUpdateUserConfigReques
 
     # 构建存储字段
     config_data: Dict[str, Any] = {}
-    if request.system_prompt is not None:
-        config_data["system_prompt"] = request.system_prompt
     if request.llm is not None:
         config_data["llm_config"] = request.llm
     if request.tts is not None:

@@ -4,6 +4,7 @@
 
 import json
 import re
+import sqlite3
 from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Body, Depends
@@ -11,8 +12,18 @@ from pydantic import BaseModel
 
 from ..config import config
 from ..memory import MemoryManager, MemoryConfig, MemoryItem, MemorySummary
-from ..user import auth_manager, user_manager
 from .deps import get_access_token
+from backend.accounts import account_registry
+from backend.personal_storage import DATA_DIR
+from backend.personal_auth import decode_personal_token, is_ui_auth_enabled
+from backend.utils.companion_identity import (
+    companion_memory_session_id,
+    companion_session_id,
+    companion_user_id,
+    parse_companion_memory_session_id,
+    parse_companion_session_id,
+    parse_companion_user_id,
+)
 
 router = APIRouter(prefix="/api", tags=["memory"])
 
@@ -49,68 +60,257 @@ def _build_memory_identity_display(user: Any, channel: str) -> str:
 
 
 async def _get_authenticated_user(token: str) -> Any:
+    if not is_ui_auth_enabled():
+        return {"personal": True}
     if not token:
         raise HTTPException(status_code=401, detail="缺少令牌")
-
-    user_info = auth_manager.get_user_from_token(token)
-    if not user_info:
+    if not decode_personal_token(token):
         raise HTTPException(status_code=401, detail="无效的令牌")
-
-    user = await user_manager.get_user_by_id(user_info["user_id"])
-    if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
-
-    return user
+    return {"personal": True}
 
 
 def _get_accessible_memory_entries(user: Any) -> List[Dict[str, str]]:
-    entries: List[Dict[str, str]] = []
-    project_user_id = str(getattr(user, "id", "") or "").strip()
-    if project_user_id:
-        username = _get_project_username(user)
-        entries.append({
-            "user_id": project_user_id,
-            "display_name": f"{username} | Web:{project_user_id}",
-            "selector_key": f"{username} | Web",
+    entries: List[Dict[str, str]] = [
+        {
+            "user_id": "web_user",
+            "display_name": "Web 控制台",
+            "selector_key": "Web 控制台",
             "channel": "web",
-            "default_session_id": project_user_id,
+            "default_session_id": "web_user",
+            "memory_user_id": "web_user",
+            "memory_session_id": "web_user",
             "remote_user_id": "",
-            "project_user_id": project_user_id,
-        })
+            "project_user_id": "web_user",
+        }
+    ]
 
-    qq_user_id = str(getattr(user, "qq_user_id", None) or "").strip()
-    if qq_user_id:
-        display_name = _build_memory_identity_display(user, "qq")
+    linyu_display_by_remote_id: Dict[str, str] = {}
+    for account in account_registry.list_accounts(enabled=True):
+        platform = str(account.get("platform") or "")
+        remote_user_id = str(account.get("remote_user_id") or "")
+        display = _account_display_name(account)
+        if not remote_user_id:
+            continue
+        if platform == "linyu":
+            linyu_display_by_remote_id[remote_user_id] = display
+            continue
+        if platform != "qq":
+            continue
         entries.append({
-            "user_id": qq_user_id,
-            "display_name": display_name,
-            "selector_key": display_name,
+            "user_id": remote_user_id,
+            "display_name": f"QQ:{display}",
+            "selector_key": f"qq:{remote_user_id}",
             "channel": "qq",
-            "default_session_id": qq_user_id,
-            "remote_user_id": qq_user_id,
-            "project_user_id": project_user_id,
+            "default_session_id": remote_user_id,
+            "memory_user_id": remote_user_id,
+            "memory_session_id": remote_user_id,
+            "remote_user_id": remote_user_id,
+            "project_user_id": remote_user_id,
         })
 
-    linyu_user_id = str(getattr(user, "linyu_user_id", None) or "").strip()
-    if linyu_user_id:
-        display_name = _build_memory_identity_display(user, "linyu")
+    companion_display_by_id: Dict[str, Dict[str, str]] = {}
+    for companion in account_registry.list_companions(enabled=True):
+        companion_key = str(companion.get("id") or "").strip()
+        if not companion_key:
+            continue
+        companion_id = str(companion.get("companion_id") or companion_user_id(companion_key))
+        companion_name = str(companion.get("companion_name") or "").strip()
+        platform_accounts = companion.get("platform_accounts") or []
+        linyu_account_name = next((item.get("account_name") for item in platform_accounts if item.get("platform") == "linyu"), "") or ""
+        qq_account_name = next((item.get("account_name") for item in platform_accounts if item.get("platform") == "qq"), "") or ""
+        companion_display_by_id[companion_key] = {
+            "companion_id": companion_id,
+            "companion_name": companion_name or linyu_account_name or qq_account_name or f"伴侣{companion_key}",
+            "ai_account_name": linyu_account_name,
+            "qq_account_name": qq_account_name,
+        }
+        bound_accounts = companion.get("bound_accounts") or []
+        user_labels: List[str] = []
+        source_sessions: List[str] = []
+        channel = "linyu" if linyu_account_name else "qq" if qq_account_name else "memory"
+        for bound_account in bound_accounts:
+            remote_user_id = str(bound_account.get("remote_user_id") or "").strip()
+            if not remote_user_id:
+                continue
+            user_account_name = _account_display_name(bound_account)
+            platform = str(bound_account.get("platform") or "").strip()
+            if platform == "linyu":
+                linyu_display_by_remote_id.setdefault(remote_user_id, user_account_name)
+            if user_account_name and user_account_name not in user_labels:
+                user_labels.append(user_account_name)
+            source_sessions.append(companion_session_id(companion_key, platform, remote_user_id))
+
+        if not source_sessions:
+            continue
+
+        platform_parts: List[str] = []
+        if linyu_account_name:
+            platform_parts.append(f"Linyu:{linyu_account_name}")
+        if qq_account_name:
+            platform_parts.append(f"QQ:{qq_account_name}")
+        users_text = "、".join(user_labels[:3]) if user_labels else "未绑定用户"
+        if len(user_labels) > 3:
+            users_text += f" 等{len(user_labels)}人"
+        label = f"{companion_display_by_id[companion_key]['companion_name']} | {' / '.join(platform_parts) or '无平台账号'} | 绑定:{users_text}"
+        memory_session_id = companion_memory_session_id(companion_key)
         entries.append({
-            "user_id": project_user_id or linyu_user_id,
-            "display_name": f"{display_name} | 项目ID:{project_user_id}" if project_user_id else display_name,
-            "selector_key": display_name,
-            "channel": "linyu",
-            "default_session_id": f"linyu_private:{linyu_user_id}",
-            "remote_user_id": linyu_user_id,
-            "project_user_id": project_user_id,
+            "user_id": companion_id,
+            "display_name": label,
+            "selector_key": f"companion:{companion_key}",
+            "channel": channel,
+            "default_session_id": memory_session_id,
+            "memory_user_id": companion_id,
+            "memory_session_id": memory_session_id,
+            "remote_user_id": "",
+            "project_user_id": companion_id,
+            "companion_id": companion_id,
+            "companion_name": companion_display_by_id[companion_key]["companion_name"],
+            "ai_account_id": companion_key,
+            "ai_account_name": linyu_account_name,
+            "user_account_name": users_text,
+            "source_session_ids": source_sessions,
         })
 
+    stored_entries = _get_stored_memory_entries(linyu_display_by_remote_id, companion_display_by_id)
+    entries.extend(stored_entries)
+    entries = _dedupe_memory_entries(entries)
     return entries
+
+
+def _account_display_name(account: Dict[str, Any]) -> str:
+    return str(
+        account.get("display_name")
+        or account.get("account_name")
+        or account.get("remote_user_id")
+        or ""
+    ).strip()
+
+
+def _get_stored_memory_entries(
+    linyu_display_by_remote_id: Dict[str, str],
+    companion_display_by_id: Dict[str, Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Expose existing memory DB identities after the personal-edition refactor.
+
+    Historical Linyu memories may be stored in older shapes and the new
+    companion-isolated shape:
+    - user_id=<old web user numeric id>, session_id=linyu_private:<linyu uuid>
+    - user_id=<linyu uuid>, session_id=<linyu uuid>
+    - user_id=companion:linyu:<id>, session_id=linyu_private:<id>:<linyu uuid>
+
+    The UI should display a friendly Linyu account when possible while querying
+    the real persisted memory keys.
+    """
+
+    db_path = DATA_DIR / "lfbot.db"
+    if not db_path.exists():
+        return []
+
+    rows: list[sqlite3.Row] = []
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT user_id, session_id, MAX(latest) AS latest, SUM(total) AS total
+                FROM (
+                    SELECT user_id, session_id, MAX(created_at) AS latest, COUNT(*) AS total
+                    FROM memory_items
+                    GROUP BY user_id, session_id
+                    UNION ALL
+                    SELECT user_id, session_id, MAX(created_at) AS latest, COUNT(*) AS total
+                    FROM memory_summaries
+                    GROUP BY user_id, session_id
+                )
+                GROUP BY user_id, session_id
+                ORDER BY latest DESC
+                """
+            ).fetchall()
+    except Exception:
+        return []
+
+    entries: List[Dict[str, str]] = []
+    for row in rows:
+        memory_user_id = str(row["user_id"] or "").strip()
+        memory_session_id = str(row["session_id"] or "").strip()
+        if not memory_user_id or not memory_session_id:
+            continue
+        if memory_user_id == "web_user" and memory_session_id == "web_user":
+            continue
+
+        channel = "web"
+        remote_user_id = memory_session_id
+        display_name = memory_user_id
+
+        parsed_companion_session = parse_companion_session_id(memory_session_id)
+        if parsed_companion_session:
+            channel = "linyu" if parsed_companion_session["platform"] == "linyu" else parsed_companion_session["platform"]
+            companion_key = parsed_companion_session["companion_id"]
+            remote_user_id = parsed_companion_session["remote_user_id"]
+            companion = companion_display_by_id.get(companion_key, {})
+            if channel == "linyu":
+                display = linyu_display_by_remote_id.get(remote_user_id)
+                if not display and _UUID_RE.fullmatch(remote_user_id):
+                    display = f"{remote_user_id[:8]}..."
+                companion_name = companion.get("companion_name") or f"伴侣{companion_key}"
+                ai_account_name = companion.get("ai_account_name") or "-"
+                display_name = f"{companion_name} | Linyu:{ai_account_name} | 用户:{display or remote_user_id}（历史记忆）"
+            else:
+                display_name = f"{companion.get('companion_name') or memory_user_id} | {channel.upper()} 用户:{remote_user_id}（历史记忆）"
+        elif _UUID_RE.fullmatch(memory_user_id):
+            channel = "linyu"
+            remote_user_id = memory_user_id
+            display = linyu_display_by_remote_id.get(remote_user_id)
+            display_name = f"Linyu:{display or remote_user_id[:8] + '...'}（历史记忆）"
+        elif parse_companion_user_id(memory_user_id) is not None:
+            channel = "linyu"
+            companion_id = str(parse_companion_user_id(memory_user_id) or "")
+            companion = companion_display_by_id.get(companion_id, {})
+            display_name = f"{companion.get('companion_name') or memory_user_id}（历史记忆）"
+        elif parse_companion_memory_session_id(memory_session_id) is not None:
+            channel = "linyu"
+            companion_id = str(parse_companion_memory_session_id(memory_session_id) or "")
+            companion = companion_display_by_id.get(companion_id, {})
+            display_name = f"{companion.get('companion_name') or memory_user_id}（统一记忆）"
+        elif memory_user_id.startswith("linyu_ai_"):
+            channel = "linyu"
+            display_name = f"Linyu AI:{memory_user_id}（历史记忆）"
+        elif memory_user_id.isdigit():
+            display_name = f"历史身份:{memory_user_id}"
+
+        selector_key = f"{channel}:{memory_user_id}:{memory_session_id}"
+        entries.append({
+            "user_id": memory_user_id,
+            "display_name": display_name,
+            "selector_key": selector_key,
+            "channel": channel,
+            "default_session_id": memory_session_id,
+            "memory_user_id": memory_user_id,
+            "memory_session_id": memory_session_id,
+            "remote_user_id": remote_user_id,
+            "project_user_id": memory_user_id,
+        })
+    return entries
+
+
+def _dedupe_memory_entries(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    deduped: List[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in entries:
+        memory_user_id = str(entry.get("memory_user_id") or entry.get("user_id") or "").strip()
+        memory_session_id = str(entry.get("memory_session_id") or entry.get("default_session_id") or "").strip()
+        key = (memory_user_id, memory_session_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
 
 
 def _get_accessible_memory_user_ids(user: Any) -> set[str]:
     allowed_ids: set[str] = set()
     for entry in _get_accessible_memory_entries(user):
-        for key in ("user_id", "remote_user_id", "project_user_id"):
+        for key in ("user_id", "remote_user_id", "project_user_id", "memory_user_id"):
             value = str(entry.get(key) or "").strip()
             if value:
                 allowed_ids.add(value)
@@ -134,7 +334,9 @@ def _ensure_session_access(user: Any, session_id: Optional[str]) -> Optional[str
 
     allowed_session_ids = {value for value in _get_accessible_memory_user_ids(user) if value}
     for entry in _get_accessible_memory_entries(user):
-        default_session_id = str(entry.get("default_session_id") or "").strip()
+        default_session_id = str(
+            entry.get("memory_session_id") or entry.get("default_session_id") or ""
+        ).strip()
         if default_session_id:
             allowed_session_ids.add(default_session_id)
 
@@ -624,6 +826,15 @@ async def clear_memories(request: ClearMemoriesRequest, token: str = Depends(get
         )
         
         if success:
+            try:
+                from backend.api.bot_provider import get_bot
+
+                bot = get_bot()
+                memory_user_id, memory_session_id = bot._get_memory_scope(request.user_id, request.session_id)
+                bot._history_manager.clear(memory_session_id, bot._get_user_system_prompt(memory_user_id))
+                bot._history_manager._history_loaded_sessions.discard(memory_session_id)
+            except Exception:
+                pass
             return {"message": "记忆清除成功"}
         else:
             raise HTTPException(status_code=500, detail="记忆清除失败")

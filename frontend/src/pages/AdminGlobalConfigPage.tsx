@@ -3,10 +3,9 @@ import {
   Card, Form, Input, Button, message, Tabs, Switch,
   InputNumber, Select, Spin, Alert, Divider, Row, Col, Tag, Space,
 } from 'antd';
-import { SaveOutlined, ReloadOutlined, GlobalOutlined, FileTextOutlined, ToolOutlined } from '@ant-design/icons';
+import { SaveOutlined, ReloadOutlined, GlobalOutlined } from '@ant-design/icons';
 import axios from 'axios';
 
-const { TextArea } = Input;
 const { Option } = Select;
 
 /**
@@ -61,12 +60,6 @@ const AdminGlobalConfigPage: React.FC = () => {
       if (formValues.llm) {
         payload.llm = deepMerge(rawConfig?.llm ?? {}, formValues.llm);
       }
-      if (formValues.system_prompt !== undefined) {
-        payload.system_prompt = formValues.system_prompt;
-      }
-      if (formValues.system_rules !== undefined) {
-        payload.system_rules = formValues.system_rules;
-      }
       if (formValues.adapters) {
         payload.adapters = deepMerge(rawConfig?.adapters ?? {}, formValues.adapters);
       }
@@ -83,8 +76,9 @@ const AdminGlobalConfigPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '400px' }}>
-        <Spin size="large" tip="加载配置中..." />
+      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '400px' }}>
+        <Spin size="large" />
+        <div style={{ marginTop: 12 }}>加载配置中...</div>
       </div>
     );
   }
@@ -161,68 +155,6 @@ const AdminGlobalConfigPage: React.FC = () => {
               },
 
               // ── 系统提示词 ────────────────────────────────────────
-              {
-                key: 'prompt',
-                label: '提示词',
-                children: (
-                  <Tabs
-                    defaultActiveKey="persona"
-                    size="small"
-                    items={[
-                      {
-                        key: 'persona',
-                        label: <span><FileTextOutlined /> 人设提示词</span>,
-                        children: (
-                          <>
-                            <Alert
-                              message="人设提示词（全局默认）"
-                              description="定义 AI 的角色、性格、世界观、语言风格和行为准则。用户未自定义时使用此默认值。"
-                              type="info"
-                              showIcon
-                              style={{ marginBottom: 16 }}
-                            />
-                            <Form.Item name="system_prompt" label="默认人设提示词">
-                              <TextArea
-                                rows={16}
-                                placeholder="输入默认的人设提示词，用户未自定义时将使用此提示词"
-                                style={{ fontFamily: 'monospace', fontSize: 13 }}
-                              />
-                            </Form.Item>
-                          </>
-                        ),
-                      },
-                      {
-                        key: 'rules',
-                        label: <span><ToolOutlined /> 功能协议</span>,
-                        children: (
-                          <>
-                            <Alert
-                              message="功能协议（全局默认）"
-                              description={
-                                <span>
-                                  定义 AI 可使用的功能指令，如图片发送 <code>[GEN_IMG:]</code>、语音 <code>[TTS]</code>、任务委派 <code>[DELEGATE:]</code> 等。
-                                  与人设分离，用户可独立覆盖。
-                                </span>
-                              }
-                              type="info"
-                              showIcon
-                              style={{ marginBottom: 16 }}
-                            />
-                            <Form.Item name="system_rules" label="默认功能协议">
-                              <TextArea
-                                rows={16}
-                                placeholder="输入默认的功能协议，留空则不注入任何功能协议"
-                                style={{ fontFamily: 'monospace', fontSize: 13 }}
-                              />
-                            </Form.Item>
-                          </>
-                        ),
-                      },
-                    ]}
-                  />
-                ),
-              },
-
               // ── 适配器 ────────────────────────────────────────────
               {
                 key: 'adapters',
@@ -396,19 +328,13 @@ const AdminGlobalConfigPage: React.FC = () => {
                       }>
                         {({ getFieldValue }) => getFieldValue(['adapters', 'linyu', 'enabled']) ? (
                           <>
-                        <Divider  plain style={{ marginTop: 8 }}>AI 账号配置</Divider>
-                        <Row gutter={16}>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'account']} label="AI 登录账号">
-                              <Input placeholder="机器人登录账号" />
-                            </Form.Item>
-                          </Col>
-                              <Col span={12}>
-                                <Form.Item name={['adapters', 'linyu', 'password']} label="密码">
-                                  <Input.Password placeholder="Linyu 登录密码" />
-                                </Form.Item>
-                              </Col>
-                            </Row>
+                            <Alert
+                              message="Linyu 伴侣账号已迁移到“账号管理”页面"
+                              description="管理员全局配置页只保留适配器连接与发送策略。伴侣账号、绑定关系以及人格提示词统一在“账号管理 / 人格设定”页面维护。"
+                              type="info"
+                              showIcon
+                              style={{ marginBottom: 16 }}
+                            />
 
                             <Divider  plain>服务器地址</Divider>
                             <Row gutter={16}>
@@ -435,28 +361,6 @@ const AdminGlobalConfigPage: React.FC = () => {
                                 </Form.Item>
                               </Col>
                             </Row>
-
-                        <Divider  plain>聊天对象</Divider>
-                        <Row gutter={16}>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'target_user_id']} label="聊天对象 userId" help="这是 AI 要回复的用户，不是 AI 自己">
-                              <Input placeholder="指定聊天对象的用户 ID" />
-                            </Form.Item>
-                          </Col>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'target_user_account']} label="聊天对象账号">
-                              <Input placeholder="指定聊天对象的账号" />
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                        <Form.Item
-                          name={['adapters', 'linyu', 'auto_bind_first_user']}
-                          label="自动绑定首个聊天对象"
-                          valuePropName="checked"
-                          help="适合单人测试；未手动指定聊天对象时，首次消息的发送者会被锁定为聊天对象"
-                        >
-                          <Switch checkedChildren="启用" unCheckedChildren="禁用" />
-                        </Form.Item>
 
                             <Divider  plain>分段发送</Divider>
                             <Form.Item

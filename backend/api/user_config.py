@@ -1,253 +1,139 @@
-"""用户配置管理 API 接口"""
-from fastapi import APIRouter, HTTPException, Depends, status
+"""Personal-edition compatibility API for legacy /user/config callers."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
-from backend.user import user_manager, auth_manager
-from backend.api.deps import get_access_token
-from backend.api.bot_provider import get_bot
+
+from backend.api.bot_provider import reset_bot
 from backend.adapters.linyu_manager import get_linyu_session_manager
+from backend.config import config
+from backend.personal_auth import require_personal_auth
 
 
-router = APIRouter(prefix="/api", tags=["user_config"])
-
-
-async def _get_current_user_from_token(token: str):
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少令牌")
-
-    user_info = auth_manager.get_user_from_token(token)
-    if not user_info:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的令牌"
-        )
-
-    user = await user_manager.get_user_by_id(user_info["user_id"])
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="用户不存在"
-        )
-
-    return user
-
-
-def _user_runtime_ids(user) -> set[str]:
-    ids = {str(user.id)}
-    for attr in ("qq_user_id", "linyu_user_id"):
-        value = str(getattr(user, attr, None) or "").strip()
-        if value:
-            ids.add(value)
-    return ids
-
-
-def _invalidate_runtime_user(user) -> None:
-    """清理该账号所有可作为运行时 user_id 的缓存键。"""
-    bot = get_bot()
-    for runtime_id in _user_runtime_ids(user):
-        try:
-            bot.invalidate_user_cache(runtime_id)
-        except Exception:
-            pass
-
-
-def _refresh_linyu_runtime_user(user) -> None:
-    manager = get_linyu_session_manager()
-    if not manager:
-        return
-    manager.request_refresh_user(str(user.id))
+router = APIRouter(prefix="/api", tags=["user_config"], dependencies=[Depends(require_personal_auth)])
 
 
 class UserConfigResponse(BaseModel):
-    """用户配置响应模型"""
+    """Compatibility shape used by older frontend pages.
+
+    In the personal edition these fields are backed by data/personal/config.yaml
+    plus data/personal/prompts/*.md, not by per-web-user override files.
+    """
+
     system_prompt: Optional[str] = None
     llm: Optional[Dict[str, Any]] = None
     tts: Optional[Dict[str, Any]] = None
+    asr: Optional[Dict[str, Any]] = None
     image_generation: Optional[Dict[str, Any]] = None
     video_generation: Optional[Dict[str, Any]] = None
     vision: Optional[Dict[str, Any]] = None
     prompt_enhancer: Optional[Dict[str, Any]] = None
     emotes: Optional[Dict[str, Any]] = None
+    proactive_chat: Optional[Dict[str, Any]] = None
     adapters: Optional[Dict[str, Any]] = None
+    agent_delegate: Optional[Dict[str, Any]] = None
     preferences: Optional[Dict[str, Any]] = None
 
 
 class UpdateUserConfigRequest(BaseModel):
-    """更新用户配置请求模型"""
-    system_prompt: Optional[str] = Field(default=None, description="系统提示词")
+    system_prompt: Optional[str] = Field(default=None, description="已弃用，改用伴侣人格设定页面")
     llm: Optional[Dict[str, Any]] = Field(default=None, description="LLM配置")
     tts: Optional[Dict[str, Any]] = Field(default=None, description="TTS配置")
+    asr: Optional[Dict[str, Any]] = Field(default=None, description="ASR配置")
     image_generation: Optional[Dict[str, Any]] = Field(default=None, description="图像生成配置")
     video_generation: Optional[Dict[str, Any]] = Field(default=None, description="视频生成配置")
     vision: Optional[Dict[str, Any]] = Field(default=None, description="视觉识别配置")
     prompt_enhancer: Optional[Dict[str, Any]] = Field(default=None, description="提示词增强配置")
     emotes: Optional[Dict[str, Any]] = Field(default=None, description="表情包配置")
+    proactive_chat: Optional[Dict[str, Any]] = Field(default=None, description="主动消息配置")
     adapters: Optional[Dict[str, Any]] = Field(default=None, description="适配器配置")
-    preferences: Optional[Dict[str, Any]] = Field(default=None, description="其他偏好设置")
+    agent_delegate: Optional[Dict[str, Any]] = Field(default=None, description="Agent委派配置")
+    preferences: Optional[Dict[str, Any]] = Field(default=None, description="个人版偏好设置")
+
+
+_CONFIG_FIELDS = {
+    "llm",
+    "tts",
+    "asr",
+    "image_generation",
+    "video_generation",
+    "vision",
+    "prompt_enhancer",
+    "emotes",
+    "proactive_chat",
+    "adapters",
+    "agent_delegate",
+    "preferences",
+}
+
+
+def _current_config_response() -> UserConfigResponse:
+    payload = {field: config.get(field, None) for field in _CONFIG_FIELDS}
+    payload["system_prompt"] = None
+    return UserConfigResponse(**payload)
+
+
+def _refresh_runtime() -> None:
+    config.refresh_from_file()
+    reset_bot()
+    manager = get_linyu_session_manager()
+    if manager:
+        manager.request_refresh_all()
 
 
 @router.get("/user/config", response_model=UserConfigResponse)
-async def get_user_config(token: str = Depends(get_access_token)):
-    """获取用户配置"""
-    user = await _get_current_user_from_token(token)
-    config_dict = await user_manager.get_user_config_dict(user.id)
-    
-    return UserConfigResponse(**config_dict)
+async def get_user_config():
+    """Return the single personal config using the legacy user-config shape."""
+
+    return _current_config_response()
 
 
 @router.put("/user/config", response_model=UserConfigResponse)
-async def update_user_config(request: UpdateUserConfigRequest, token: str = Depends(get_access_token)):
-    """更新用户配置"""
-    user = await _get_current_user_from_token(token)
-    
-    # 构建配置数据
-    config_data = {}
-    if request.system_prompt is not None:
-        config_data['system_prompt'] = request.system_prompt
-    if request.llm is not None:
-        config_data['llm_config'] = request.llm
-    if request.tts is not None:
-        config_data['tts_config'] = request.tts
-    if request.image_generation is not None:
-        config_data['image_gen_config'] = request.image_generation
-    if request.video_generation is not None:
-        config_data['video_gen_config'] = request.video_generation
-    if request.vision is not None:
-        config_data['vision_config'] = request.vision
-    if request.prompt_enhancer is not None:
-        config_data['prompt_enhancer_config'] = request.prompt_enhancer
-    if request.emotes is not None:
-        config_data['emote_config'] = request.emotes
-    if request.adapters is not None:
-        config_data['adapters'] = request.adapters
-    if request.preferences is not None:
-        config_data['preferences'] = request.preferences
-    
-    # 更新配置
-    success = await user_manager.update_user_config(user.id, config_data)
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="配置更新失败"
-        )
-    
-    _invalidate_runtime_user(user)
-    config_dict = await user_manager.get_user_config_dict(user.id)
-    _refresh_linyu_runtime_user(user)
-    
-    return UserConfigResponse(**config_dict)
+async def update_user_config(request: UpdateUserConfigRequest):
+    """Update the single personal config through the legacy user-config endpoint."""
+
+    update_data = request.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        if key == "system_prompt":
+            continue
+        if key in _CONFIG_FIELDS and value is not None:
+            config.update_config(key, value)
+
+    _refresh_runtime()
+    return _current_config_response()
 
 
 @router.delete("/user/config")
-async def reset_user_config(token: str = Depends(get_access_token), config_type: Optional[str] = None):
-    """重置用户配置
-    
-    Args:
-        token: 访问令牌
-        config_type: 配置类型，可选值: system_prompt, llm, tts, image_generation, vision, 
-                     prompt_enhancer, emotes, preferences
-                     如果不指定，则重置所有配置
-    """
-    user = await _get_current_user_from_token(token)
-    
-    # 构建重置数据
-    config_data = {}
-    
-    if config_type:
-        # 重置指定类型的配置
-        valid_types = [
-            'system_prompt', 'llm', 'tts', 'image_generation', 'video_generation',
-            'vision', 'prompt_enhancer', 'emotes', 'adapters', 'preferences'
-        ]
-        
-        if config_type not in valid_types:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"无效的配置类型。有效类型: {', '.join(valid_types)}"
-            )
-        
-        if config_type == 'system_prompt':
-            config_data['system_prompt'] = None
-        elif config_type == 'llm':
-            config_data['llm_config'] = None
-        elif config_type == 'tts':
-            config_data['tts_config'] = None
-        elif config_type == 'image_generation':
-            config_data['image_gen_config'] = None
-        elif config_type == 'video_generation':
-            config_data['video_gen_config'] = None
-        elif config_type == 'vision':
-            config_data['vision_config'] = None
-        elif config_type == 'prompt_enhancer':
-            config_data['prompt_enhancer_config'] = None
-        elif config_type == 'emotes':
-            config_data['emote_config'] = None
-        elif config_type == 'adapters':
-            config_data['adapters'] = None
-        elif config_type == 'preferences':
-            config_data['preferences'] = None
-    else:
-        # 重置所有配置
-        config_data = {
-            'system_prompt': None,
-            'llm_config': None,
-            'tts_config': None,
-            'image_gen_config': None,
-            'video_gen_config': None,
-            'vision_config': None,
-            'prompt_enhancer_config': None,
-            'emote_config': None,
-            'adapters': None,
-            'preferences': None
-        }
-    
-    # 更新配置
-    success = await user_manager.update_user_config(user.id, config_data)
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="配置重置失败"
-        )
+async def reset_user_config(config_type: Optional[str] = None):
+    """Clear compatible personal-edition config fields.
 
-    _invalidate_runtime_user(user)
-    _refresh_linyu_runtime_user(user)
-    
-    return {"message": "配置重置成功"}
+    This exists so older reset buttons do not fail, but the personal edition
+    has no per-user override to restore.
+    """
+
+    if config_type:
+        if config_type in _CONFIG_FIELDS:
+            config.update_config(config_type, {})
+            _refresh_runtime()
+        return {"message": "配置已重置"}
+
+    config.update_config("preferences", {})
+    _refresh_runtime()
+    return {"message": "配置已重置"}
 
 
 @router.get("/user/profile", response_model=Dict[str, Any])
-async def get_user_profile(token: str = Depends(get_access_token)):
-    """获取用户完整信息（包括配置）"""
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少令牌")
-    user_info = auth_manager.get_user_from_token(token)
-    
-    if not user_info:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的令牌"
-        )
-    
-    user = await user_manager.get_user_by_id(user_info['user_id'])
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="用户不存在"
-        )
-    
-    config_dict = await user_manager.get_user_config_dict(user_info['user_id'])
-    
+async def get_user_profile():
     return {
-        "id": user.id,
-        "username": user.username,
-        "nickname": user.nickname,
-        "qq_user_id": user.qq_user_id,
-        "avatar": user.avatar,
-        "is_active": user.is_active,
-        "is_admin": user.is_admin,
-        "created_at": user.created_at.isoformat(),
-        "config": config_dict
+        "id": 1,
+        "username": "admin",
+        "nickname": "个人管理员",
+        "qq_user_id": None,
+        "avatar": None,
+        "is_active": True,
+        "is_admin": 1,
+        "config": _current_config_response().dict(),
     }

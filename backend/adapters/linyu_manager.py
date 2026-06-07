@@ -4,12 +4,12 @@ import asyncio
 import copy
 import json
 import threading
-from datetime import datetime
 from typing import Any, Dict, Optional
 
 from ..config import config
-from ..user import user_manager
 from ..utils.config_merger import config_merger
+from ..accounts import account_registry
+from ..utils.companion_identity import companion_user_id, parse_companion_session_id
 from .linyu import LinyuAdapter
 
 
@@ -112,8 +112,18 @@ class LinyuSessionManager:
     async def get_adapter_for_target(self, target: Dict[str, Any]) -> Optional[LinyuAdapter]:
         target_user_id = str(target.get("user_id") or "").strip()
         session_id = str(target.get("session_id") or "").strip()
+        companion_id = str(target.get("companion_id") or target.get("owner_user_id") or "").strip()
 
         with self._lock:
+            adapter = self._adapters.get(companion_id) if companion_id else None
+            if adapter:
+                return adapter
+
+            owner_from_session = self._owner_id_from_session_id(session_id)
+            adapter = self._adapters.get(owner_from_session) if owner_from_session else None
+            if adapter:
+                return adapter
+
             adapter = self._adapters.get(target_user_id)
             if adapter:
                 return adapter
@@ -121,22 +131,21 @@ class LinyuSessionManager:
             adapters = list(self._adapters.items())
 
         for owner_id, adapter in adapters:
-            configured_target_id = str(getattr(adapter, "target_user_id", "") or "").strip()
-            if configured_target_id and configured_target_id == target_user_id:
-                return adapter
-
-            configured_target_account = str(getattr(adapter, "target_user_account", "") or "").strip()
-            if configured_target_account and configured_target_account == target_user_id:
+            allowed_user_ids = set(str(item) for item in getattr(adapter, "allowed_user_ids", set()) or set())
+            if target_user_id and target_user_id in allowed_user_ids:
                 return adapter
 
             if session_id and session_id == owner_id:
                 return adapter
 
-        global_adapter = dict(adapters).get("global")
-        if global_adapter:
-            return global_adapter
-
         return None
+
+    @staticmethod
+    def _owner_id_from_session_id(session_id: str) -> str:
+        parsed = parse_companion_session_id(session_id)
+        if not parsed:
+            return ""
+        return companion_user_id(parsed["companion_id"])
 
     def get_status_snapshot(self) -> Dict[str, Dict[str, Any]]:
         snapshot: Dict[str, Dict[str, Any]] = {}
@@ -199,83 +208,74 @@ class LinyuSessionManager:
     async def _collect_user_linyu_configs(self, owner_user_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         collected: Dict[str, Dict[str, Any]] = {}
         global_linyu = copy.deepcopy((config.adapters_config or {}).get("linyu", {}) or {})
-        global_account = str(global_linyu.get("account", "") or "").strip()
-        global_password = str(global_linyu.get("password", "") or "").strip()
 
-        if owner_user_id is None and global_linyu.get("enabled", False):
-            if global_account and global_password:
-                collected["global"] = global_linyu
-
-        if owner_user_id is not None:
-            user = await user_manager.get_user_by_id(int(owner_user_id))
-            users = [user] if user else []
-        else:
-            users = await user_manager.list_users(limit=1000)
-
-        for user in users:
-            if user is None:
+        ai_accounts = account_registry.list_linyu_ai_accounts(enabled=True)
+        for ai_account in ai_accounts:
+            owner_id = companion_user_id(ai_account["id"])
+            if owner_user_id is not None and str(owner_user_id) != owner_id:
                 continue
 
-            overrides = await user_manager.get_user_config_dict(user.id)
-            user_adapters = (overrides or {}).get("adapters", {}) or {}
-            user_linyu = user_adapters.get("linyu")
-            if not isinstance(user_linyu, dict):
-                continue
-
-            user_account = str(user_linyu.get("account", "") or "").strip()
-            user_password = str(user_linyu.get("password", "") or "").strip()
-            has_personal_credentials = bool(user_account and user_password)
-            uses_copied_global_credentials = (
-                has_personal_credentials
-                and user_account == global_account
-                and user_password == global_password
-            )
-            if uses_copied_global_credentials:
-                bound_account = str(getattr(user, "linyu_account", "") or "").strip()
-                bound_user_id = str(getattr(user, "linyu_user_id", "") or "").strip()
-                # Existing user configs are full copies of config.yaml. Treat a copied
-                # global Linyu login as "not personally configured", otherwise every
-                # bound user starts a duplicate session for the same AI account.
-                if user_account in {bound_account, bound_user_id}:
-                    print(
-                        "⚠️ 跳过用户级 Linyu 会话: "
-                        f"owner={user.id}, AI 登录账号与绑定身份相同 ({user_account})"
-                    )
-                else:
-                    print(
-                        "ℹ️ 跳过用户级 Linyu 会话: "
-                        f"owner={user.id}, 使用的是全局 Linyu 登录账号副本 ({user_account})"
-                    )
-                continue
+            user_linyu = {
+                "enabled": bool(ai_account.get("enabled", True)),
+                "account": ai_account.get("account_name") or ai_account.get("account", ""),
+                "password": ai_account.get("password", ""),
+            }
+            metadata = ai_account.get("metadata") or {}
+            if isinstance(metadata, dict):
+                user_linyu.update(metadata.get("linyu", {}) if isinstance(metadata.get("linyu"), dict) else {})
 
             merged_linyu = config_merger.get_user_config(global_linyu, user_linyu, skip_empty=True)
             if not merged_linyu.get("enabled", False):
                 continue
 
+            for field in ("target_user_id", "target_user_account", "auto_bind_first_user"):
+                merged_linyu.pop(field, None)
+
             # 用户级 Linyu 配置只负责提供个人 AI 账号，连接地址统一继承全局配置，
-            # 聊天对象默认使用该用户已绑定的 Linyu 身份，避免前端再手填目标账号。
+            # 聊天对象只使用账号管理里的显式绑定。
             for field in ("http_host", "http_port", "ws_host", "ws_port"):
                 if field in global_linyu:
                     merged_linyu[field] = global_linyu.get(field)
                 else:
                     merged_linyu.pop(field, None)
 
-            merged_linyu["target_user_id"] = str(
-                user.linyu_user_id
-                or merged_linyu.get("target_user_id", "")
+            bound_accounts = [
+                account for account in (ai_account.get("bound_accounts") or [])
+                if str(account.get("platform") or "") == "linyu"
+                and bool(account.get("enabled", True))
+                and str(account.get("remote_user_id") or "").strip()
+            ]
+            if not bound_accounts:
+                continue
+
+            merged_linyu["_companion_id"] = owner_id
+            merged_linyu["_companion_name"] = str(ai_account.get("companion_name") or "").strip()
+            merged_linyu["_ai_account_id"] = int(ai_account["id"])
+            merged_linyu["_ai_account_name"] = str(ai_account.get("account_name") or ai_account.get("account") or "").strip()
+            merged_linyu["_allowed_user_ids"] = [
+                str(account.get("remote_user_id") or "").strip()
+                for account in bound_accounts
+            ]
+            merged_linyu["_bound_accounts"] = [
+                {
+                    "id": account.get("id"),
+                    "platform": account.get("platform"),
+                    "account_name": account.get("account_name") or account.get("display_name") or account.get("remote_user_id"),
+                    "remote_user_id": account.get("remote_user_id"),
+                    "display_name": account.get("display_name") or account.get("account_name") or account.get("remote_user_id"),
+                }
+                for account in bound_accounts
+            ]
+            # Compatibility for old status consumers.
+            merged_linyu["_target_user_id"] = merged_linyu["_allowed_user_ids"][0]
+            merged_linyu["_target_display_name"] = str(
+                merged_linyu["_bound_accounts"][0].get("display_name") or ""
             ).strip()
-            merged_linyu["target_user_account"] = str(
-                user.linyu_account
-                or merged_linyu.get("target_user_account", "")
-            ).strip()
-            merged_linyu["auto_bind_first_user"] = bool(user_linyu.get("auto_bind_first_user", False))
 
             if not merged_linyu.get("account") or not merged_linyu.get("password"):
                 continue
-            if not merged_linyu.get("target_user_id") and not merged_linyu.get("target_user_account"):
-                continue
 
-            collected[str(user.id)] = merged_linyu
+            collected[owner_id] = merged_linyu
 
         return collected
 

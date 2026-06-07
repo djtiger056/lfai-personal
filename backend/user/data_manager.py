@@ -18,6 +18,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import logging
 
+from backend.utils.config_sanitizer import sanitize_adapters_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,6 +118,8 @@ class UserDataManager:
                     return True
 
                 merged = _deep_merge(admin_config, existing)
+                if "adapters" in merged:
+                    merged["adapters"] = sanitize_adapters_config(merged["adapters"])
                 if merged != existing:
                     with open(config_path, 'w', encoding='utf-8') as f:
                         yaml.dump(merged, f, default_flow_style=False, allow_unicode=True)
@@ -124,7 +128,11 @@ class UserDataManager:
 
             source = self._get_admin_config_source()
             if source:
-                shutil.copyfile(source, config_path)
+                data = self._load_admin_config()
+                if "adapters" in data:
+                    data["adapters"] = sanitize_adapters_config(data["adapters"])
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
             else:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     yaml.dump({}, f, default_flow_style=False, allow_unicode=True)
@@ -167,6 +175,8 @@ class UserDataManager:
                     pass
 
             merged = _deep_merge(existing, config)
+            if "adapters" in merged:
+                merged["adapters"] = sanitize_adapters_config(merged["adapters"])
 
             with open(config_path, 'w', encoding='utf-8') as f:
                 yaml.dump(merged, f, default_flow_style=False, allow_unicode=True)
@@ -197,9 +207,13 @@ class UserDataManager:
             admin_config = self._load_admin_config()
             for k in keys:
                 if k in admin_config:
-                    data[k] = copy.deepcopy(admin_config[k])
+                    value = copy.deepcopy(admin_config[k])
+                    data[k] = sanitize_adapters_config(value) if k == "adapters" else value
                 else:
                     data.pop(k, None)
+
+            if "adapters" in data:
+                data["adapters"] = sanitize_adapters_config(data["adapters"])
 
             with open(config_path, 'w', encoding='utf-8') as f:
                 yaml.dump(data, f, default_flow_style=False, allow_unicode=True)

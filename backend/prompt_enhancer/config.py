@@ -165,7 +165,7 @@ class PromptEnhancerConfig(BaseModel):
         description="内置词库文件路径",
     )
     custom_word_bank_path: str = Field(
-        default="data/custom_prompt_words.yaml",
+        default="data/personal/custom_prompt_words.yaml",
         description="自定义词库文件路径",
     )
     

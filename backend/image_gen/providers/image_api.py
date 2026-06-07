@@ -14,29 +14,40 @@ logger = logging.getLogger(__name__)
 
 
 class ImageApiProvider(BaseImageProvider):
-    """Image API 图像生成提供商 — 统一接入 Jimeng/Doubao/XYQ/Kling 平台"""
+    """Image API 图像生成提供商 — 统一接入 Jimeng/Doubao/XYQ/Kling/Qwen 平台"""
 
     SUPPORTED_MODELS = {
         # Jimeng（即梦）
-        "jimeng-2.1", "jimeng-3.0", "jimeng-3.1", "jimeng-4.0", "jimeng-4.1",
-        "jimeng-4.5", "jimeng-4.6", "jimeng-5.0", "jimeng-xl-pro",
+        "jimeng-4.0", "jimeng-4.1", "jimeng-4.5", "jimeng-4.6", "jimeng-4.7",
+        "jimeng-5.0",
         # Doubao（豆包）
-        "doubao-seedream-3.0", "doubao-seedream-4.0", "doubao-seedream-4.5",
+        "doubao-seedream-4.0", "doubao-seedream-4.5", "doubao-seedream-5.0-lite",
         # XYQ（小云雀）
         "xyq-seedream-4.0", "xyq-seedream-4.5", "xyq-seedream-5.0",
         # Kling（可灵）
-        "kling-v2-1", "kling-v3-omni", "kling-image-o1",
+        "kling-v3-omni", "kling-image-o1",
+        # Qwen/Wan（通义千问）
+        "wan2.7-image", "qwen-image-1.0", "qwen-image-1.0-pro", "qwen-image-2.0",
+        # Seedream 统一路由
+        "seedream-4.0", "seedream-4.5", "seedream-5.0",
     }
-    DEFAULT_MODEL = "doubao-seedream-4.5"
+    DEFAULT_MODEL = "seedream-5.0"
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.api_base = config.get("api_base", "http://127.0.0.1:18081")
+        self.api_base = str(config.get("api_base", "http://127.0.0.1:8006") or "http://127.0.0.1:8006").rstrip("/")
         self.api_key = config.get("api_key", "")
         self.timeout = config.get("timeout", 120)
         self.ratio = config.get("ratio", "1:1")
         self.resolution = config.get("resolution", "2k")
         self.sample_strength = config.get("sample_strength", 0.5)
+        self.negative_prompt = str(config.get("negative_prompt", "") or "")
+        self.intelligent_ratio = bool(config.get("intelligent_ratio", False))
+        self.response_format = str(config.get("response_format", "url") or "url")
+        self.n = int(config.get("n", 1) or 1)
+        self.provider_options = config.get("provider_options") or {}
+        if not isinstance(self.provider_options, dict):
+            self.provider_options = {}
 
         # 模型设置：支持列表中的模型直接使用，其他模型也允许（服务端可能新增了模型）
         requested_model = config.get("model", self.DEFAULT_MODEL)
@@ -49,6 +60,53 @@ class ImageApiProvider(BaseImageProvider):
             )
             self.model = requested_model
 
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return headers
+
+    def _generation_endpoint(self, composition: bool = False) -> str:
+        if composition:
+            return "/v1/images/compositions"
+        if self.model.startswith("seedream-"):
+            return "/v1/seedream/generations"
+        return "/v1/images/generations"
+
+    def _build_payload(
+        self,
+        prompt: str,
+        images: Optional[List[str]] = None,
+        force_composition: bool = False,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "response_format": self.response_format,
+        }
+
+        if self.ratio:
+            payload["ratio"] = self.ratio
+        if self.resolution:
+            payload["resolution"] = self.resolution
+        if self.n:
+            payload["n"] = self.n
+        if self.negative_prompt:
+            payload["negative_prompt"] = self.negative_prompt
+        if self.sample_strength is not None:
+            payload["sample_strength"] = self.sample_strength
+        if self.intelligent_ratio:
+            payload["intelligent_ratio"] = True
+        if self.provider_options:
+            payload["provider_options"] = self.provider_options
+
+        clean_images = [str(image).strip() for image in (images or []) if str(image or "").strip()]
+        if clean_images:
+            payload["images"] = clean_images[:10]
+        if force_composition and not clean_images:
+            payload["images"] = []
+        return payload
+
     async def generate(self, prompt: str) -> Optional[bytes]:
         """文生图：根据提示词生成图像
 
@@ -59,20 +117,8 @@ class ImageApiProvider(BaseImageProvider):
             图像二进制数据（JPEG），失败返回 None
         """
         try:
-            url = f"{self.api_base}/v1/images/generations"
-
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
-
-            data = {
-                "model": self.model,
-                "prompt": prompt,
-                "ratio": self.ratio,
-                "resolution": self.resolution,
-                "n": 1,
-                "response_format": "url",
-            }
+            url = f"{self.api_base}{self._generation_endpoint()}"
+            data = self._build_payload(prompt)
 
             timeout = ClientTimeout(
                 connect=10,
@@ -82,7 +128,7 @@ class ImageApiProvider(BaseImageProvider):
             )
 
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=headers, json=data) as response:
+                async with session.post(url, headers=self._headers(), json=data) as response:
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error(
@@ -92,27 +138,7 @@ class ImageApiProvider(BaseImageProvider):
 
                     result = await response.json(content_type=None)
 
-                    if not result or "data" not in result or not result.get("data"):
-                        logger.error(f"Image API 文生图失败: 响应中无 data 数组或为空, 实际响应: {result}")
-                        return None
-
-                    image_data = result["data"][0]
-
-                    # 如果返回的是 URL，下载图片（带重试）
-                    if "url" in image_data:
-                        image_url = image_data["url"]
-                        return await self._download_image_with_retry(image_url)
-
-                    # 如果返回的是 Base64 数据
-                    elif "b64_json" in image_data:
-                        image_bytes = base64.b64decode(image_data["b64_json"])
-                        image = Image.open(BytesIO(image_bytes))
-                        img_buffer = BytesIO()
-                        image.save(img_buffer, format="JPEG")
-                        return img_buffer.getvalue()
-
-                    logger.error("Image API 文生图失败: 响应中无 url 或 b64_json 字段")
-                    return None
+                    return await self._extract_image_from_response(session, result)
 
         except aiohttp.ClientError as e:
             logger.error(f"Image API 文生图网络错误: {str(e)}")
@@ -274,22 +300,8 @@ class ImageApiProvider(BaseImageProvider):
             图像二进制数据（JPEG），失败返回 None
         """
         try:
-            url = f"{self.api_base}/v1/images/compositions"
-
-            headers = {"Content-Type": "application/json"}
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
-
-            data = {
-                "model": self.model,
-                "prompt": prompt,
-                "images": images,
-                "ratio": self.ratio,
-                "resolution": self.resolution,
-                "sample_strength": self.sample_strength,
-                "n": 1,
-                "response_format": "url",
-            }
+            url = f"{self.api_base}{self._generation_endpoint(composition=True)}"
+            data = self._build_payload(prompt, images=images, force_composition=True)
 
             timeout = ClientTimeout(
                 connect=10,
@@ -299,7 +311,7 @@ class ImageApiProvider(BaseImageProvider):
             )
 
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=headers, json=data) as response:
+                async with session.post(url, headers=self._headers(), json=data) as response:
                     if response.status == 200:
                         result = await response.json(content_type=None)
 
@@ -316,7 +328,7 @@ class ImageApiProvider(BaseImageProvider):
                                 f"task_id={result['task_id']}"
                             )
                             return await self._poll_task(
-                                session, result["task_id"], headers
+                                session, result["task_id"], self._headers()
                             )
 
                         # 直接返回结果

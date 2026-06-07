@@ -30,6 +30,44 @@ def ensure_utf8_output() -> None:
 ensure_utf8_output()
 
 
+def read_config_server_port(project_root: Path, default: int = 8003) -> int:
+    """从 config.yaml 解析 server.port，避免本地脚本和配置端口脱节。"""
+    config_path = project_root / "config.yaml"
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except Exception:
+        return default
+
+    in_server_block = False
+    server_indent = -1
+
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = line.strip()
+
+        if not in_server_block:
+            if stripped == "server:":
+                in_server_block = True
+                server_indent = indent
+            continue
+
+        if indent <= server_indent and stripped.endswith(":"):
+            break
+
+        if indent > server_indent and stripped.startswith("port:"):
+            value = stripped.split(":", 1)[1].strip().strip("'\"")
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+    return default
+
+
 def is_venv_active() -> bool:
     """检查当前是否在虚拟环境中运行"""
     # 两种常见的虚拟环境检测方法
@@ -148,8 +186,10 @@ def main() -> None:
     # 添加项目根目录到Python路径
     project_root = Path(__file__).parent
     sys.path.insert(0, str(project_root))
+    backend_port = read_config_server_port(project_root)
     
     print("🚀 启动 LFBot...")
+    print(f"🌐 后端端口: {backend_port}")
     
     # 检查虚拟环境状态
     check_virtual_environment(project_root)
@@ -180,7 +220,7 @@ def main() -> None:
             sys.exit(1)
     
     # 检查并清理端口
-    check_and_free_port(8003)
+    check_and_free_port(backend_port)
     
     print("执行 backend.main...")
     import subprocess

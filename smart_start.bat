@@ -2,6 +2,9 @@
 chcp 65001 >nul
 title LFBot 后端启动
 cd /d "%~dp0"
+set "PROJECT_DIR=%cd%"
+set "FRONTEND_PORT=3000"
+call "%PROJECT_DIR%\tools\load_windows_env.bat"
 
 echo ========================================
 echo     LFBot 后端启动（仅后端）
@@ -20,18 +23,19 @@ call venv\Scripts\activate.bat
 echo      OK
 
 echo [2/3] 清理端口...
-netstat -ano 2>nul | findstr ":8003.*LISTENING" >nul 2>&1
+netstat -ano 2>nul | findstr ":%BACKEND_PORT%.*LISTENING" >nul 2>&1
 if not errorlevel 1 (
-    for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8003.*LISTENING"') do (
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%BACKEND_PORT%.*LISTENING"') do (
         taskkill /PID %%a /F >nul 2>&1
     )
     timeout /t 2 /nobreak >nul
-    echo      已清理端口 8003
+    echo      已清理端口 %BACKEND_PORT%
 ) else (
     echo      OK - 端口可用
 )
 
 echo [3/3] 启动后端...
+echo      后端地址: http://localhost:%BACKEND_PORT%
 echo.
 
 python run.py

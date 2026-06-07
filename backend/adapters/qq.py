@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any
 from ..core.bot import Bot
 from ..config import config
 from ..api import proactive as proactive_api
+from ..accounts import account_registry
+from ..utils.companion_identity import companion_session_id
 from ..utils.text_splitter import smart_split_text
 from .debouncer import MessageDebouncer
 
@@ -73,6 +75,8 @@ class QQAdapter:
         self.follow_up_waiters: Dict[str, asyncio.Future] = {}
         # 防重复发送同一张表情包
         self._emote_send_cache: Dict[str, Dict[str, float]] = {}
+        self._companion_cache: Optional[Dict[str, Any]] = None
+        self._allowed_user_ids_cache: Optional[set[str]] = None
         
     async def start(self):
         """启动QQ适配器，带自动重连功能"""
@@ -220,6 +224,13 @@ class QQAdapter:
         # 忽略自己发送的消息（NapCat/OneBot 可能回传自身消息导致重复触发）
         if self_id and user_id == self_id:
             return
+
+        self._remember_self_identity(self_id)
+
+        allowed_user_ids = self._get_allowed_user_ids()
+        if allowed_user_ids and user_id not in allowed_user_ids:
+            print(f"ℹ️ 忽略未绑定 QQ 用户消息: {user_id}")
+            return
         
         # 检查用户访问权限
         has_access, deny_message = self._check_user_access(user_id)
@@ -295,16 +306,18 @@ class QQAdapter:
     async def _do_private_reply(self, user_id: str, text_content: str):
         """执行私聊回复（可能由防抖器合并后调用）"""
         try:
-            proactive_api.record_user_activity("qq_private", user_id, user_id, text_content)
-            response = await self.bot.chat(text_content, user_id=user_id)
-            proactive_api.record_assistant_activity("qq_private", user_id, user_id, response)
+            bot_user_id = self._get_bot_user_id(user_id)
+            session_id = self._get_bot_session_id(user_id)
+            proactive_api.record_user_activity("qq_private", user_id, session_id, text_content)
+            response = await self.bot.chat(text_content, user_id=bot_user_id, session_id=session_id)
+            proactive_api.record_assistant_activity("qq_private", user_id, session_id, response)
 
-            if self.bot.pop_last_mode_command(user_id, user_id):
+            if self.bot.pop_last_mode_command(bot_user_id, session_id):
                 if response:
                     await self._send_raw_private_message(user_id, response)
                 return
 
-            if await self._is_roleplay_mode(user_id):
+            if await self._is_roleplay_mode(bot_user_id):
                 if response:
                     await self._send_raw_private_message(user_id, response)
                 return
@@ -316,12 +329,12 @@ class QQAdapter:
                 print(f"[QQ Adapter] 检测到Bot主动生成图片，大小: {len(image_data)} bytes")
             last_video = self.bot.get_last_generated_video()
 
-            voice_only = self.bot.is_voice_only_mode(user_id)
+            voice_only = self.bot.is_voice_only_mode(bot_user_id)
 
             if voice_only:
-                audio_data = await self._resolve_tts_audio(response, user_id)
+                audio_data = await self._resolve_tts_audio(response, bot_user_id)
 
-                text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
+                text_to_send = self.bot.strip_tts_text(response, user_id=bot_user_id)
 
                 if text_to_send:
                     await self.send_private_message(user_id, text_to_send)
@@ -336,9 +349,9 @@ class QQAdapter:
                 if last_video and last_video.get("video_url"):
                     await self.send_video_message(user_id, last_video["video_url"])
             else:
-                audio_data = await self._resolve_tts_audio(response, user_id)
+                audio_data = await self._resolve_tts_audio(response, bot_user_id)
 
-                text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
+                text_to_send = self.bot.strip_tts_text(response, user_id=bot_user_id)
                 if text_to_send:
                     await self.send_private_message(user_id, text_to_send)
 
@@ -374,6 +387,13 @@ class QQAdapter:
 
         # 忽略自己发送的消息，避免重复响应
         if self_id and user_id == self_id:
+            return
+
+        self._remember_self_identity(self_id)
+
+        allowed_user_ids = self._get_allowed_user_ids()
+        if allowed_user_ids and user_id not in allowed_user_ids:
+            print(f"ℹ️ 忽略未绑定 QQ 群聊用户消息: {group_id}/{user_id}")
             return
         
         # 解析消息内容
@@ -456,17 +476,18 @@ class QQAdapter:
     async def _do_group_reply(self, group_id: str, user_id: str, text_content: str):
         """执行群聊回复（可能由防抖器合并后调用）"""
         try:
-            session_id = f"group_{group_id}_{user_id}"
+            bot_user_id = self._get_bot_user_id(user_id)
+            session_id = self._get_bot_group_session_id(group_id, user_id)
             proactive_api.record_user_activity("qq_group", group_id, session_id, text_content)
-            response = await self.bot.chat(text_content, user_id=user_id, session_id=session_id)
+            response = await self.bot.chat(text_content, user_id=bot_user_id, session_id=session_id)
             proactive_api.record_assistant_activity("qq_group", group_id, session_id, response)
 
-            if self.bot.pop_last_mode_command(user_id, session_id):
+            if self.bot.pop_last_mode_command(bot_user_id, session_id):
                 if response:
                     await self._send_raw_group_message(group_id, response)
                 return
 
-            if await self._is_roleplay_mode(user_id):
+            if await self._is_roleplay_mode(bot_user_id):
                 if response:
                     await self._send_raw_group_message(group_id, response)
                 return
@@ -478,16 +499,16 @@ class QQAdapter:
                 print(f"[QQ Adapter] 检测到Bot主动生成图片（群聊），大小: {len(image_data)} bytes")
             last_video = self.bot.get_last_generated_video()
 
-            voice_only = self.bot.is_voice_only_mode(user_id)
+            voice_only = self.bot.is_voice_only_mode(bot_user_id)
 
             if voice_only:
                 try:
-                    audio_data = await self._resolve_tts_audio(response, user_id)
+                    audio_data = await self._resolve_tts_audio(response, bot_user_id)
                 except Exception as e:
                     print(f"❌ TTS合成失败: {str(e)}")
                     audio_data = None
 
-                text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
+                text_to_send = self.bot.strip_tts_text(response, user_id=bot_user_id)
                 if text_to_send:
                     await self.send_group_message(group_id, text_to_send)
 
@@ -500,9 +521,9 @@ class QQAdapter:
                 if last_video and last_video.get("video_url"):
                     await self.send_video_message(group_id, last_video["video_url"], is_group=True, group_id=group_id)
             else:
-                audio_data = await self._resolve_tts_audio(response, user_id)
+                audio_data = await self._resolve_tts_audio(response, bot_user_id)
 
-                text_to_send = self.bot.strip_tts_text(response, user_id=user_id)
+                text_to_send = self.bot.strip_tts_text(response, user_id=bot_user_id)
                 if text_to_send:
                     await self.send_group_message(group_id, text_to_send)
 
@@ -1022,10 +1043,8 @@ class QQAdapter:
         """处理图像生成请求（仅生成图片，失败时发送错误消息）"""
         try:
             # 配置按“用户”生效；上下文/记忆按“会话”隔离（群聊会话独立）
-            effective_user_id = user_id or target_id
-            session_id = target_id
-            if is_group and group_id and user_id:
-                session_id = f"group_{group_id}_{user_id}"
+            effective_user_id = self._get_bot_user_id(user_id or target_id)
+            session_id = self._get_bot_group_session_id(group_id, user_id) if is_group and group_id and user_id else self._get_bot_session_id(target_id)
 
             # 生成图像
             image_data = await self.bot.generate_image(prompt, user_id=effective_user_id, session_id=session_id)
@@ -1129,11 +1148,8 @@ class QQAdapter:
             user_message = "\n\n".join(user_message_parts)
             
             # 调用LLM生成回复
-            user_identifier = target_id
-            if is_group and user_id:
-                user_identifier = f"group_{group_id}_{user_id}"
-            
-            effective_user_id = user_id or target_id
+            user_identifier = self._get_bot_group_session_id(group_id, user_id) if is_group and group_id and user_id else self._get_bot_session_id(target_id)
+            effective_user_id = self._get_bot_user_id(user_id or target_id)
             proactive_api.record_user_activity(
                 "qq_group" if is_group else "qq_private",
                 target_id,
@@ -1245,11 +1261,8 @@ class QQAdapter:
             user_message = "\n".join(user_message_parts)
 
             # 调用LLM生成回复
-            user_identifier = target_id
-            if is_group and user_id:
-                user_identifier = f"group_{group_id}_{user_id}"
-
-            effective_user_id = user_id or target_id
+            user_identifier = self._get_bot_group_session_id(group_id, user_id) if is_group and group_id and user_id else self._get_bot_session_id(target_id)
+            effective_user_id = self._get_bot_user_id(user_id or target_id)
             proactive_api.record_user_activity(
                 "qq_group" if is_group else "qq_private",
                 target_id,
@@ -1442,6 +1455,62 @@ class QQAdapter:
             return bool(await checker(user_id))
         except Exception:
             return False
+
+    def _resolve_companion(self) -> Optional[Dict[str, Any]]:
+        if self._companion_cache is not None:
+            return self._companion_cache
+        self_id = str(self.user_id or "").strip()
+        if self_id:
+            companion = account_registry.get_companion_by_platform_identity("qq", remote_user_id=self_id, account_name=self_id)
+            if companion:
+                self._companion_cache = companion
+                return companion
+        return None
+
+    def _remember_self_identity(self, self_id: str) -> None:
+        normalized = str(self_id or "").strip()
+        if not normalized:
+            return
+        if str(self.user_id or "").strip() == normalized:
+            return
+        self.user_id = normalized
+        self._companion_cache = None
+        self._allowed_user_ids_cache = None
+
+    def _get_allowed_user_ids(self) -> set[str]:
+        if self._allowed_user_ids_cache is not None:
+            return self._allowed_user_ids_cache
+        companion = self._resolve_companion()
+        if not companion:
+            self._allowed_user_ids_cache = set()
+            return self._allowed_user_ids_cache
+        allowed = {
+            str(account.get("remote_user_id") or "").strip()
+            for account in (companion.get("bound_accounts") or [])
+            if str(account.get("platform") or "").strip() == "qq"
+            and bool(account.get("enabled", True))
+            and str(account.get("remote_user_id") or "").strip()
+        }
+        self._allowed_user_ids_cache = allowed
+        return allowed
+
+    def _get_bot_user_id(self, peer_user_id: str) -> str:
+        companion = self._resolve_companion()
+        if companion and companion.get("companion_id"):
+            return str(companion["companion_id"])
+        return str(peer_user_id)
+
+    def _get_bot_session_id(self, peer_user_id: str) -> str:
+        companion = self._resolve_companion()
+        if companion:
+            return companion_session_id(companion["id"], "qq", str(peer_user_id))
+        return str(peer_user_id)
+
+    def _get_bot_group_session_id(self, group_id: Optional[str], user_id: Optional[str]) -> str:
+        companion = self._resolve_companion()
+        if companion and group_id and user_id:
+            return f"{companion_session_id(companion['id'], 'qq_group', str(group_id))}:{str(user_id)}"
+        return f"group_{group_id}_{user_id}"
 
     async def stop(self):
         """停止适配器"""

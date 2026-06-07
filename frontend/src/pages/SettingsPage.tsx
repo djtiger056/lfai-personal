@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { 
   Card, 
   Form, 
-  Input, 
+  Input,
   InputNumber, 
   Switch, 
   Button, 
@@ -23,7 +23,6 @@ import { systemConfigProxy } from '@/services/configProxy'
 import { useAuth } from '../contexts/AuthContext'
 
 const { Option } = Select
-const { TextArea } = Input
 
 const SettingsPage: React.FC = () => {
   const [form] = Form.useForm()
@@ -73,12 +72,14 @@ const SettingsPage: React.FC = () => {
       const values = {
         llm: deepMerge(currentConfig.llm, formValues.llm),
         adapters: deepMerge(currentConfig.adapters, formValues.adapters),
-        system_prompt: formValues.system_prompt ?? currentConfig.system_prompt,
       }
       
       await systemConfigProxy.updateConfig(values)
       message.success('配置保存成功')
-      setConfig(values)
+      setConfig({
+        ...(currentConfig as SystemConfig),
+        ...values,
+      })
     } catch (error) {
       console.error('Save config error:', error)
       message.error('保存配置失败')
@@ -428,19 +429,13 @@ const SettingsPage: React.FC = () => {
                   {({ getFieldValue }) =>
                     getFieldValue(['adapters', 'linyu', 'enabled']) ? (
                       <>
-                        <Divider  plain style={{ marginTop: 8 }}>AI 账号配置</Divider>
-                        <Row gutter={16}>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'account']} label="AI 登录账号">
-                              <Input placeholder="机器人登录账号" />
-                            </Form.Item>
-                          </Col>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'password']} label="密码">
-                              <Input.Password placeholder="Linyu 登录密码" />
-                            </Form.Item>
-                          </Col>
-                        </Row>
+                        <Alert
+                          message="Linyu 伴侣账号已迁移到“账号管理”页面统一维护"
+                          description="这里仅保留连接服务器和收发消息相关的适配器配置。具体伴侣账号、绑定关系、人格提示词请到“账号管理”和“人格设定”页面维护。"
+                          type="info"
+                          showIcon
+                          style={{ marginBottom: 16 }}
+                        />
 
                         <Divider  plain>服务器地址</Divider>
                         <Row gutter={16}>
@@ -467,28 +462,6 @@ const SettingsPage: React.FC = () => {
                             </Form.Item>
                           </Col>
                         </Row>
-
-                        <Divider  plain>聊天对象</Divider>
-                        <Row gutter={16}>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'target_user_id']} label="聊天对象 userId" help="这是 AI 要回复的用户，不是 AI 自己">
-                              <Input placeholder="指定聊天对象的用户 ID" />
-                            </Form.Item>
-                          </Col>
-                          <Col span={12}>
-                            <Form.Item name={['adapters', 'linyu', 'target_user_account']} label="聊天对象账号">
-                              <Input placeholder="指定聊天对象的账号" />
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                        <Form.Item
-                          name={['adapters', 'linyu', 'auto_bind_first_user']}
-                          label="自动绑定首个聊天对象"
-                          valuePropName="checked"
-                          help="适合单人测试；未手动指定聊天对象时，首次消息的发送者会被锁定为聊天对象"
-                        >
-                          <Switch checkedChildren="启用" unCheckedChildren="禁用" />
-                        </Form.Item>
 
                         <Divider  plain>分段发送</Divider>
                         <Form.Item
@@ -580,24 +553,6 @@ const SettingsPage: React.FC = () => {
             </Form>
           </Tabs.TabPane>
 
-          <Tabs.TabPane tab="系统提示词" key="prompt">
-            <Form
-              form={form}
-              layout="vertical"
-            >
-              <Form.Item
-                label="系统提示词"
-                name="system_prompt"
-                help="定义AI角色的提示词，影响机器人的性格和回复风格"
-                rules={[{ required: true, message: '请输入系统提示词' }]}
-              >
-                <TextArea
-                  rows={8}
-                  placeholder="你是一个友好的AI助手..."
-                />
-              </Form.Item>
-            </Form>
-          </Tabs.TabPane>
         </Tabs>
       </Card>
     </div>

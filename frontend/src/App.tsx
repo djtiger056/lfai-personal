@@ -1,6 +1,6 @@
 import React from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
-import { Layout, Menu, Dropdown, Avatar, Button, Space, Divider } from 'antd'
+import { Layout, Menu, Dropdown, Avatar, Button, Space } from 'antd'
 import {
   MessageOutlined,
   SettingOutlined,
@@ -11,21 +11,17 @@ import {
   VideoCameraOutlined,
   DatabaseOutlined,
   EyeOutlined,
-  BellOutlined,
-  HighlightOutlined,
   SmileOutlined,
   ClockCircleOutlined,
   ScheduleOutlined,
   ToolOutlined,
   LogoutOutlined,
-  CrownOutlined,
-  GlobalOutlined,
   DashboardOutlined,
   RocketOutlined,
   BookOutlined,
+  HighlightOutlined,
 } from '@ant-design/icons'
 import ChatPage from './pages/ChatPage'
-import SettingsPage from './pages/SettingsPage'
 import UserSettingsPage from './pages/UserSettingsPage'
 import PersonalityPage from './pages/PersonalityPage'
 import TTSConfigPage from './pages/TTSConfigPage.tsx'
@@ -44,6 +40,7 @@ import AdminUsersPage from './pages/AdminUsersPage'
 import LoginPage from './pages/LoginPage'
 import AdminGlobalConfigPage from './pages/AdminGlobalConfigPage'
 import RoleplayModePage from './pages/RoleplayModePage'
+import AccountsPage from './pages/AccountsPage'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -53,9 +50,8 @@ const { Header, Sider, Content } = Layout
 const MainLayout: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
-  const { user, isAdmin, logout } = useAuth()
+  const { user, logout } = useAuth()
 
-  // 普通用户菜单项
   const userMenuItems = [
     {
       key: '/chat',
@@ -65,7 +61,12 @@ const MainLayout: React.FC = () => {
     {
       key: '/settings',
       icon: <SettingOutlined />,
-      label: '我的设置',
+      label: '系统配置',
+    },
+    {
+      key: '/accounts',
+      icon: <ToolOutlined />,
+      label: '账号管理',
     },
     {
       key: '/personality',
@@ -134,33 +135,7 @@ const MainLayout: React.FC = () => {
     },
   ]
 
-  // 管理员专属菜单项
-  const adminMenuItems = [
-    {
-      key: 'admin-divider',
-      type: 'divider' as const,
-    },
-    {
-      key: 'admin-group',
-      type: 'group' as const,
-      label: '管理员功能',
-      children: [
-        {
-          key: '/admin/global-config',
-          icon: <GlobalOutlined />,
-          label: '全局配置',
-        },
-        {
-          key: '/admin/users',
-          icon: <ToolOutlined />,
-          label: '用户管理',
-        },
-      ],
-    },
-  ]
-
-  // 根据用户角色组合菜单
-  const menuItems = isAdmin ? [...userMenuItems, ...adminMenuItems] : userMenuItems
+  const menuItems = userMenuItems
 
   const handleMenuClick = ({ key }: { key: string }) => {
     if (key !== 'admin-divider' && key !== 'admin-group') {
@@ -219,17 +194,6 @@ const MainLayout: React.FC = () => {
         }}>
           <span>LFBot 管理界面</span>
           <Space>
-            {isAdmin && (
-              <span style={{ 
-                fontSize: '12px', 
-                color: '#faad14',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-              }}>
-                <CrownOutlined /> 管理员
-              </span>
-            )}
             <Dropdown menu={{ items: userDropdownItems }} placement="bottomRight">
               <Button type="text" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Avatar 
@@ -247,6 +211,7 @@ const MainLayout: React.FC = () => {
             <Route path="/" element={<Navigate to="/chat" replace />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/settings" element={<UserSettingsPage />} />
+            <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/personality" element={<PersonalityPage />} />
             <Route path="/roleplay-mode" element={<RoleplayModePage />} />
             <Route path="/tts" element={<TTSConfigPage />} />
@@ -260,7 +225,6 @@ const MainLayout: React.FC = () => {
             <Route path="/reminder" element={<ReminderPage />} />
             <Route path="/cerebellum" element={<CerebellumPage />} />
             <Route path="/agent-delegate" element={<AgentDelegatePage />} />
-            {/* 管理员路由 */}
             <Route path="/admin/global-config" element={
               <ProtectedRoute requireAdmin>
                 <AdminGlobalConfigPage />

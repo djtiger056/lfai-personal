@@ -1,19 +1,19 @@
-"""提示词管理器
+"""个人版提示词管理器。
 
-负责每个用户提示词的读取、写入、变更记录。
-存储位置：user_data/{username}/system_prompt.md
-变更记录：user_data/{username}/prompt_history.json
+真实存储位置：data/personal/prompts/*.md
+变更记录：data/personal/prompts/prompt_history.json
 """
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from backend.prompt_system.models import PromptChangeRecord, PromptData, PromptHistory
-from backend.user.data_manager import user_data_manager
 from backend.utils.datetime_utils import get_now
 from backend.config import config
+from backend.personal_storage import PERSONAL_PROMPTS_DIR, ensure_personal_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -52,25 +52,38 @@ class PromptManager:
     def __init__(self):
         self._cache: Dict[str, str] = {}  # username -> prompt content 缓存
 
+    def _identity_dir(self, username: str) -> Path:
+        """Return the prompt directory for a prompt identity.
+
+        The personal edition keeps the default prompt files at
+        data/personal/prompts/*.md. Companion identities get isolated files
+        under data/personal/prompts/companions/<safe-id>/.
+        """
+        ensure_personal_dirs()
+        raw = str(username or "").strip()
+        if raw.startswith("companion:"):
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("_") or "companion"
+            path = PERSONAL_PROMPTS_DIR / "companions" / safe_name
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        PERSONAL_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+        return PERSONAL_PROMPTS_DIR
+
     def _get_prompt_path(self, username: str) -> Path:
-        """获取用户提示词文件路径"""
-        user_dir = user_data_manager._get_user_dir(username)
-        return user_dir / PROMPT_FILE
+        """获取个人版提示词文件路径。"""
+        return self._identity_dir(username) / PROMPT_FILE
 
     def _get_rules_path(self, username: str) -> Path:
-        """获取用户功能协议文件路径"""
-        user_dir = user_data_manager._get_user_dir(username)
-        return user_dir / RULES_FILE
+        """获取个人版功能协议文件路径。"""
+        return self._identity_dir(username) / RULES_FILE
 
     def _get_roleplay_prompt_path(self, username: str) -> Path:
-        """获取用户情景演绎提示词文件路径"""
-        user_dir = user_data_manager._get_user_dir(username)
-        return user_dir / ROLEPLAY_PROMPT_FILE
+        """获取个人版情景演绎提示词文件路径。"""
+        return self._identity_dir(username) / ROLEPLAY_PROMPT_FILE
 
     def _get_history_path(self, username: str) -> Path:
-        """获取用户提示词变更历史文件路径"""
-        user_dir = user_data_manager._get_user_dir(username)
-        return user_dir / HISTORY_FILE
+        """获取个人版提示词变更历史文件路径。"""
+        return self._identity_dir(username) / HISTORY_FILE
 
     def get_prompt(self, username: str) -> Optional[str]:
         """获取用户的系统提示词
@@ -150,14 +163,12 @@ class PromptManager:
             是否成功
         """
         try:
-            # 确保用户目录存在
-            user_data_manager._ensure_user_dirs(username)
-
             # 读取旧内容用于记录
             old_content = self.get_prompt(username) or ""
 
             # 写入新提示词
             prompt_path = self._get_prompt_path(username)
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
             prompt_path.write_text(content, encoding="utf-8")
 
             # 更新缓存
@@ -248,7 +259,7 @@ class PromptManager:
         self._cache.clear()
 
     def migrate_from_config(self, username: str) -> bool:
-        """从全局 config.yaml 迁移提示词到用户独立文件
+        """从当前配置对象迁移提示词到个人版提示词文件
         
         仅在用户没有独立提示词文件时执行。
         
@@ -262,22 +273,6 @@ class PromptManager:
         if self.get_prompt(username) is not None:
             return False
 
-        # 先检查用户 config.yaml 中是否有 system_prompt
-        user_config = user_data_manager.load_user_config(username)
-        user_prompt = None
-        if user_config and isinstance(user_config, dict):
-            user_prompt = user_config.get("system_prompt")
-
-        # 如果用户配置中有提示词，优先迁移用户的
-        if user_prompt and isinstance(user_prompt, str) and user_prompt.strip():
-            return self.set_prompt(
-                username=username,
-                content=user_prompt.strip(),
-                source="migration",
-                summary="从用户 config.yaml 迁移",
-            )
-
-        # 否则使用全局提示词
         global_prompt = config.system_prompt
         if global_prompt and global_prompt.strip():
             return self.set_prompt(
@@ -351,8 +346,8 @@ class PromptManager:
             是否成功
         """
         try:
-            user_data_manager._ensure_user_dirs(username)
             rules_path = self._get_rules_path(username)
+            rules_path.parent.mkdir(parents=True, exist_ok=True)
             rules_path.write_text(content, encoding="utf-8")
             logger.info(f"功能协议已更新 username={username} source={source} length={len(content)}")
             return True
@@ -411,8 +406,8 @@ class PromptManager:
     def set_roleplay_prompt(self, username: str, content: str) -> bool:
         """设置用户情景演绎提示词。"""
         try:
-            user_data_manager._ensure_user_dirs(username)
             prompt_path = self._get_roleplay_prompt_path(username)
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
             prompt_path.write_text(content, encoding="utf-8")
             logger.info(f"情景演绎提示词已更新 username={username} length={len(content)}")
             return True
@@ -443,6 +438,7 @@ class PromptManager:
         """添加变更记录"""
         try:
             history_path = self._get_history_path(username)
+            history_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 读取已有记录
             records: List[Dict[str, Any]] = []

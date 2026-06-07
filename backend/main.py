@@ -63,12 +63,12 @@ from backend.memory.reminder_scheduler import ReminderScheduler
 from backend.api.user_auth import router as user_auth_router
 from backend.api.user_config import router as user_config_router
 from backend.api.admin_users import router as admin_users_router
+from backend.api.accounts import router as accounts_router
 from backend.api.voice_session import router as voice_session_router
 from backend.api.daily_schedule import router as daily_schedule_router
 from backend.api.prompt import router as prompt_router
 from backend.api.agent_delegate import router as agent_delegate_router
 from backend.api.linyu_sessions import router as linyu_sessions_router
-from backend.user import user_manager
 
 # 创建 FastAPI 应用
 app = FastAPI(title="LFBot API", version="1.0.0")
@@ -118,6 +118,7 @@ app.include_router(access_control_router)
 app.include_router(user_auth_router)
 app.include_router(user_config_router)
 app.include_router(admin_users_router)
+app.include_router(accounts_router)
 app.include_router(voice_session_router)
 app.include_router(daily_schedule_router)
 app.include_router(prompt_router)
@@ -169,8 +170,11 @@ def _has_interactive_stdin() -> bool:
 
 async def _warm_up_shared_bot() -> Bot:
     """Create shared runtime resources before the first user request arrives."""
+    # 个人版认证不依赖旧网页登录用户表，但历史管理员用户页/API 仍会读取
+    # data/users.db。启动时建表可避免空数据库文件导致 /api/admin/users 500。
+    from backend.user import user_manager
     await user_manager.init_db()
-    print("✓ 用户数据库已初始化")
+    print("✓ 兼容用户数据库已初始化")
 
     from backend.api.bot_provider import get_bot
     bot = get_bot()

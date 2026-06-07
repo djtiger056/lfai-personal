@@ -4,6 +4,9 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const frontendPort = Number(process.env.VITE_PORT || 3000)
+const apiTarget = process.env.VITE_API_TARGET || 'http://127.0.0.1:8003'
+const wsTarget = process.env.VITE_WS_TARGET || apiTarget.replace(/^http/i, 'ws')
 
 export default defineConfig({
   plugins: [react()],
@@ -13,15 +16,15 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: frontendPort,
     host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:8003',
+        target: apiTarget,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8003',
+        target: wsTarget,
         ws: true,
       },
     },

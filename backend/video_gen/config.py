@@ -1,12 +1,12 @@
 from typing import Any, Dict, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class VideoApiConfig(BaseModel):
     """Images API 视频生成服务配置。"""
 
-    api_base: str = "http://127.0.0.1:18080"
+    api_base: str = "http://127.0.0.1:8006"
     api_key: str = ""
     provider: str = "qwen"
     model: str = "wan2.7-t2v"
@@ -16,6 +16,14 @@ class VideoApiConfig(BaseModel):
     duration: int = 5
     use_async: bool = False
     poll_interval: float = 4.0
+    response_format: str = "url"
+    poll_timeout_ms: int = 600000
+    poll_interval_ms: int = 4000
+    timeout_ms: int = 420000
+    provider_options: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        extra = "allow"
 
 
 class VideoGenerationConfig(BaseModel):

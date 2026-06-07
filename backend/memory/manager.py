@@ -574,6 +574,11 @@ class MemoryManager(BaseMemoryManager):
     async def clear_all_memories(self, user_id: str, session_id: str = None):
         """清除所有记忆"""
         try:
+            normalized_user_id = str(user_id or "").strip()
+            normalized_session_id = str(session_id or "").strip() if session_id else None
+            if normalized_session_id:
+                normalized_user_id, normalized_session_id = self._normalize_memory_scope(user_id, session_id)
+
             # 清除短期记忆和摘要（调用基类方法）
             await super().clear_short_term_memories(user_id, session_id)
 
@@ -581,10 +586,10 @@ class MemoryManager(BaseMemoryManager):
             if self.async_session:
                 async with self.async_session() as session:
                     stmt = select(MemorySummaryDB).where(
-                        MemorySummaryDB.user_id == user_id
+                        MemorySummaryDB.user_id == normalized_user_id
                     )
-                    if session_id:
-                        stmt = stmt.where(MemorySummaryDB.session_id == session_id)
+                    if normalized_session_id:
+                        stmt = stmt.where(MemorySummaryDB.session_id == normalized_session_id)
 
                     result = await session.execute(stmt)
                     summaries = result.scalars().all()
@@ -596,11 +601,11 @@ class MemoryManager(BaseMemoryManager):
 
             # 清除长期记忆
             if self.vector_store:
-                await self.vector_store.clear_user_memories(user_id)
+                await self.vector_store.clear_user_memories(normalized_user_id)
 
             # 清除会话状态
-            if session_id:
-                key = f"{user_id}_{session_id}"
+            if normalized_session_id:
+                key = f"{normalized_user_id}_{normalized_session_id}"
                 if key in self.session_states:
                     del self.session_states[key]
 

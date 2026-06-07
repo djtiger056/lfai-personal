@@ -16,10 +16,11 @@ from ..providers import get_provider
 from ..tts.manager import TTSManager
 from ..image_gen import ImageGenerationManager, ImageGenerationConfig
 from ..video_gen import VideoGenerationManager, VideoGenerationConfig
-from ..user import user_manager
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now
-from ..prompt_system import prompt_manager
+from ..prompt_defaults import DEFAULT_ROLEPLAY_PROMPT
+from ..prompt_system.manager import prompt_manager
+from ..utils.companion_identity import parse_companion_user_id
 
 
 logger = logging.getLogger(__name__)
@@ -80,14 +81,6 @@ class UserResourceCache:
                 return self._user_configs.get(user_id, {})
 
         user_config = {}
-        try:
-            user = await self.resolve_user(user_id)
-            if user:
-                user_config = await user_manager.get_user_config_dict(user.id)
-                # 缓存 user_id -> username 映射（供提示词系统使用）
-                self._user_id_to_username[user_id] = user.username
-        except Exception as e:
-            logger.warning(f"获取用户配置失败: {e}")
 
         # 更新缓存
         self._user_configs[user_id] = user_config
@@ -96,34 +89,8 @@ class UserResourceCache:
         return user_config
 
     async def resolve_user(self, user_id: str):
-        """按 Web 数字 ID、QQ ID、Linyu ID、username 解析真实用户。"""
-        user = None
-        user_id_str = str(user_id)
-
-        if user_id_str.isdigit():
-            user = await user_manager.get_user_by_id(int(user_id_str))
-
-        if user is None:
-            user = await user_manager.get_user_by_qq_id(user_id_str)
-
-        if user is None:
-            user = await user_manager.get_user_by_linyu_id(user_id_str)
-
-        # 数字 ID 和 QQ/Linyu 都没找到，尝试按 username 精确匹配
-        if user is None:
-            user = await user_manager.get_user_by_username(user_id_str)
-
-        if user is None and not user_id_str.isdigit():
-            is_uuid = len(user_id_str) == 36 and user_id_str.count("-") == 4
-            if not is_uuid:
-                try:
-                    user = await user_manager.get_or_create_user_by_qq_id(user_id_str)
-                except Exception as e:
-                    logger.warning(f"自动创建 QQ 用户失败 user_id={user_id}: {e}")
-
-        if user:
-            self._user_id_to_username[user_id_str] = user.username
-        return user
+        """个人版不再解析网页登录用户，保留空实现供旧调用兼容。"""
+        return None
 
     def get_merged_config(self, user_id: str) -> Dict[str, Any]:
         """获取合并后的用户配置（全局 + 用户覆盖）。
@@ -148,6 +115,7 @@ class UserResourceCache:
             'emotes': config.emote_config.dict() if hasattr(config.emote_config, 'dict') else {},
             'prompt_enhancer': config.prompt_enhancer_config.dict() if hasattr(config.prompt_enhancer_config, 'dict') else {},
             'proactive_chat': config.proactive_chat_config,
+            'preferences': config.get('preferences', {}) or {},
         }
 
         return config_merger.get_user_config(global_config, user_config, skip_empty=True)
@@ -265,20 +233,10 @@ class UserResourceCache:
         """获取用户的系统提示词（人设层）。
 
         优先级：
-        1. 提示词系统（user_data/{username}/system_prompt.md）
-        2. 用户配置中的 system_prompt（旧路径兼容）
-        3. 全局 config.yaml 中的 system_prompt
+        1. 伴侣/用户独立提示词文件
+        2. 全局默认 system_prompt
         """
-        # 尝试通过提示词系统获取
-        username = self._resolve_username(user_id)
-        if username:
-            prompt = prompt_manager.get_prompt(username)
-            if prompt:
-                return prompt
-
-        # 回退到旧逻辑（用户配置 > 全局配置）
-        user_config = self._user_configs.get(user_id, {})
-        return config_merger.get_system_prompt(config.system_prompt, user_config.get('system_prompt'))
+        return prompt_manager.get_effective_prompt(user_id)
 
     def get_system_rules(self, user_id: str) -> str:
         """获取用户的功能协议层提示词（视觉/语音/委派等协议）。
@@ -290,43 +248,27 @@ class UserResourceCache:
         Returns:
             功能协议内容，可能为空字符串（表示不注入）
         """
-        username = self._resolve_username(user_id)
-        if username:
-            return prompt_manager.get_effective_rules(username)
+        if parse_companion_user_id(user_id) is not None:
+            return prompt_manager.get_effective_rules(user_id)
         return config.system_rules or ""
 
     def get_roleplay_prompt(self, user_id: str) -> str:
         """获取用户情景演绎模式提示词。"""
-        username = self._resolve_username(user_id)
-        if username:
-            return prompt_manager.get_effective_roleplay_prompt(username)
-        from ..prompt_system import DEFAULT_ROLEPLAY_PROMPT
-        return DEFAULT_ROLEPLAY_PROMPT
+        return prompt_manager.get_effective_roleplay_prompt(user_id) or str(
+            config.get("roleplay_prompt", "") or DEFAULT_ROLEPLAY_PROMPT
+        )
 
     def get_chat_mode(self, user_id: str) -> str:
         """获取用户聊天模式，默认 companion。"""
-        user_config = self._user_configs.get(user_id, {}) or {}
-        preferences = user_config.get("preferences", {}) or {}
+        preferences = config.get("preferences", {}) or {}
         mode = str(preferences.get("chat_mode", "companion") or "companion").strip().lower()
         return "roleplay" if mode == "roleplay" else "companion"
 
     def get_roleplay_memory_config(self, user_id: str) -> Dict[str, Any]:
         """获取用户情景演绎记忆配置覆盖项。"""
-        user_config = self._user_configs.get(user_id, {}) or {}
-        preferences = user_config.get("preferences", {}) or {}
+        preferences = config.get("preferences", {}) or {}
         roleplay_memory = preferences.get("roleplay_memory", {}) or {}
         return roleplay_memory if isinstance(roleplay_memory, dict) else {}
-
-    def invalidate_user(self, user_id: str) -> None:
-        """清理指定用户缓存，使配置变更立即生效。"""
-        self._user_configs.pop(user_id, None)
-        self._user_config_cache_time.pop(user_id, None)
-        self._user_providers.pop(user_id, None)
-        self._user_provider_signatures.pop(user_id, None)
-        self._user_tts_managers.pop(user_id, None)
-        self._user_tts_signatures.pop(user_id, None)
-        self._user_image_gen_managers.pop(user_id, None)
-        self._user_image_gen_signatures.pop(user_id, None)
 
     def _resolve_username(self, user_id: str) -> Optional[str]:
         """从 user_id 解析出 username（用于提示词系统文件路径）。

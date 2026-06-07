@@ -48,7 +48,9 @@ async def test_user_config_can_persist_adapters_section(tmp_path):
                         "enabled": True,
                         "account": "ai_tester01",
                         "password": "pwd001",
+                        "target_user_id": "legacy-user-id",
                         "target_user_account": "user_tester01",
+                        "auto_bind_first_user": True,
                     }
                 }
             },
@@ -58,7 +60,9 @@ async def test_user_config_can_persist_adapters_section(tmp_path):
         cfg = await manager.get_user_config_dict(user.id)
         assert cfg["adapters"]["linyu"]["enabled"] is True
         assert cfg["adapters"]["linyu"]["account"] == "ai_tester01"
-        assert cfg["adapters"]["linyu"]["target_user_account"] == "user_tester01"
+        assert "target_user_id" not in cfg["adapters"]["linyu"]
+        assert "target_user_account" not in cfg["adapters"]["linyu"]
+        assert "auto_bind_first_user" not in cfg["adapters"]["linyu"]
     finally:
         user_manager_module.user_data_manager = original_data_manager
 

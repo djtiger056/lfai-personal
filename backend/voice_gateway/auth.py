@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 import jwt
 
-from backend.config import config
+from backend.jwt_secret import get_jwt_secret_key
 from backend.utils.datetime_utils import get_now
 
 from .config import VoiceGatewayAuthConfig
@@ -20,7 +20,7 @@ class VoiceTokenManager:
 
     def __init__(self, auth_config: VoiceGatewayAuthConfig):
         self.auth_config = auth_config
-        self.secret_key = config.get("jwt_secret_key", "your-secret-key-change-this-in-production")
+        self.secret_key = get_jwt_secret_key()
         self.algorithm = "HS256"
 
     def create_token(
@@ -58,4 +58,3 @@ class VoiceTokenManager:
             raise VoiceTokenError("invalid token type")
 
         return payload
-

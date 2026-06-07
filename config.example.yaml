@@ -18,11 +18,17 @@ jwt_secret_key: CHANGE_ME_TO_A_LONG_RANDOM_SECRET
 admin:
   api_key: CHANGE_ME_TO_A_LONG_RANDOM_ADMIN_TOKEN
 
+auth:
+  ui_auth:
+    enabled: true
+    username: admin
+    password: admin
+
 system_prompt: |
   你是 LFBot，一个温柔、自然、会陪伴聊天的 AI 助手。
 
 # 功能协议层（与人设分离，系统维护，用户一般不需要修改）
-# 支持每用户独立配置：user_data/{username}/system_rules.md 优先于此全局配置
+# 个人版首次启动后会迁移到 data/personal/prompts/system_rules.md
 # 留空则不注入任何功能协议
 system_rules: ""
 
@@ -170,21 +176,38 @@ image_generation:
     api_key: ""
     model: ""
     base_url: https://yunwu.ai/v1
-  # Image API 本地服务配置（基于 Jimeng 即梦平台）
+  # Images API 统一服务配置（支持即梦/豆包/小云雀/可灵/通义千问/Seedream 统一路由）
   image_api:
-    api_base: "http://127.0.0.1:18081"  # 本地 Images API 服务地址
+    api_base: "http://127.0.0.1:8006"  # Images API 服务地址
     api_key: ""  # API 密钥，为空时不发送认证头
-    model: "jimeng-4.5"  # 支持: jimeng-4.5, jimeng-4.6, jimeng-5.0
+    model: "seedream-5.0"  # 推荐：seedream-5.0；也可填 jimeng-5.0 / doubao-seedream-5.0-lite / qwen-image-2.0 等
     timeout: 120  # 请求超时时间（秒）
     ratio: "1:1"  # 图片比例
     resolution: "2k"  # 图片分辨率
     sample_strength: 0.5  # 图生图参考强度，范围 0.0-1.0
+    negative_prompt: ""
+    intelligent_ratio: false
+    response_format: "url"
+    n: 1
+    provider_options: {}
   # GPT-Image 中转站配置（仅支持图生图，计费 0.04 元/张）
   gpt_image:
     api_base: ""  # 中转站地址，如 https://your-proxy.com
     api_key: ""  # 中转站 API Key（Bearer Token）
     model: "gpt-image-2"  # 模型名称
     timeout: 180  # 请求超时时间（秒），gpt-image 生图较慢建议 ≥180
+  # GPT-Image Edits 接口配置（来源提供商：/v1/images/edits multipart）
+  gpt_image_edits:
+    api_base: "https://jeniya.top"
+    api_key: ""  # Bearer Token；服务端不要求时可留空
+    model: "gpt-image-2-all"
+    timeout: 180
+    ratio: "1:1"  # 图片比例
+    resolution: "1k"  # 分辨率档位：1k / 2k / 4k
+    quality: ""  # 可选：auto / high / medium / low
+    background: ""  # 可选：transparent / opaque / auto
+    moderation: ""  # 可选：auto / low
+    response_format: "url"
   # 默认兜底底图路径（当用户未上传底图时使用）
   default_base_image_path: "backend/data/default_base_image.jpg"
 
@@ -192,9 +215,9 @@ video_generation:
   enabled: false
   provider: video_api
   video_api:
-    api_base: "http://127.0.0.1:18080"
+    api_base: "http://127.0.0.1:8006"
     api_key: ""
-    provider: qwen
+    provider: qwen  # qwen / doubao / jimeng / xyq / international
     model: wan2.7-t2v
     timeout: 600
     ratio: "16:9"
@@ -202,6 +225,11 @@ video_generation:
     duration: 5
     use_async: false
     poll_interval: 4
+    response_format: "url"
+    poll_timeout_ms: 600000
+    poll_interval_ms: 4000
+    timeout_ms: 420000
+    provider_options: {}
   trigger_keywords:
     - 生成视频
     - 做个视频
@@ -250,7 +278,7 @@ emotes:
 
 prompt_enhancer:
   enabled: false
-  custom_word_bank_path: data/custom_prompt_words.yaml
+  custom_word_bank_path: data/personal/custom_prompt_words.yaml
 
 cerebellum:
   enabled: false

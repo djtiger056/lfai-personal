@@ -105,8 +105,15 @@ interface MemoryUserInfo {
   selector_key?: string
   channel?: string
   default_session_id?: string
+  memory_user_id?: string
+  memory_session_id?: string
   remote_user_id?: string
   project_user_id?: string
+  companion_id?: string
+  companion_name?: string
+  ai_account_id?: string
+  ai_account_name?: string
+  user_account_name?: string
 }
 
 const EMBEDDING_HISTORY_STORAGE_KEY = 'lfbot.memory.embedding.history.v1'
@@ -198,10 +205,10 @@ const MemoryPage: React.FC = () => {
   const memoryUserIdOptions = Array.from(
     new Map(
       memoryUserOptions.map(info => [
-        info.user_id,
+        info.memory_user_id || info.user_id,
         {
           label: info.display_name || info.user_id,
-          value: info.user_id,
+          value: info.memory_user_id || info.user_id,
         },
       ])
     ).values()
@@ -221,8 +228,11 @@ const MemoryPage: React.FC = () => {
   const savedConfigRef = useRef<MemoryConfig | null>(null)
 
   const selectedMemoryUser = memoryUserOptions.find((info) => getMemoryOptionValue(info) === selectedUserId)
-  const selectedMemoryUserId = selectedMemoryUser?.user_id || selectedUserId
-  const selectedSessionId = selectedMemoryUser?.default_session_id || selectedMemoryUserId
+  const selectedMemoryUserId = selectedMemoryUser?.memory_user_id || selectedMemoryUser?.user_id || selectedUserId
+  const selectedSessionId =
+    selectedMemoryUser?.memory_session_id ||
+    selectedMemoryUser?.default_session_id ||
+    selectedMemoryUserId
 
   // 配置标签页
   useEffect(() => {
@@ -806,6 +816,8 @@ const MemoryPage: React.FC = () => {
       setMidTermMemories([])
       setLongTermMemories([])
       setSearchResults([])
+      await loadStats()
+      await loadMemoryUsers()
     } catch (error) {
       console.error('清除记忆失败:', error)
       message.error('清除记忆失败')
@@ -1076,7 +1088,7 @@ const MemoryPage: React.FC = () => {
     <div style={{ padding: '0 24px' }}>
       <h1>记忆系统管理</h1>
       <div style={{ marginBottom: 16 }}>
-        <Space>
+        <Space wrap>
           <span>选择记忆身份:</span>
           <Select
             style={{ width: 420 }}
@@ -1096,6 +1108,21 @@ const MemoryPage: React.FC = () => {
             刷新记忆身份
           </Button>
         </Space>
+        {selectedMemoryUser ? (
+          <div style={{ marginTop: 8 }}>
+            <Space wrap size={8}>
+              <Tag color={selectedMemoryUser.channel === 'linyu' ? 'blue' : selectedMemoryUser.channel === 'qq' ? 'purple' : undefined}>
+                {selectedMemoryUser.channel || 'web'}
+              </Tag>
+              {selectedMemoryUser.companion_name ? <span>伴侣：{selectedMemoryUser.companion_name}</span> : null}
+              {selectedMemoryUser.ai_account_name ? <span>Linyu：{selectedMemoryUser.ai_account_name}</span> : null}
+              {selectedMemoryUser.user_account_name ? <span>用户：{selectedMemoryUser.user_account_name}</span> : null}
+              {!selectedMemoryUser.companion_name && !selectedMemoryUser.user_account_name ? (
+                <span>{selectedMemoryUser.display_name}</span>
+              ) : null}
+            </Space>
+          </div>
+        ) : null}
       </div>
       <Tabs activeKey={activeTab} onChange={setActiveTab}>
         {/* 配置标签页 */}
@@ -1776,13 +1803,13 @@ const MemoryPage: React.FC = () => {
                   刷新
                 </Button>
                 <Popconfirm
-                  title="确定要清除所有短期记忆吗？"
+                  title="确定要清除当前选中身份的短期记忆吗？"
                   onConfirm={handleClearMemories}
                   okText="确定"
                   cancelText="取消"
                 >
                   <Button icon={<DeleteOutlined />} danger>
-                    清除所有记忆
+                    清除当前身份记忆
                   </Button>
                 </Popconfirm>
               </Space>
@@ -1871,13 +1898,13 @@ const MemoryPage: React.FC = () => {
                       刷新
                     </Button>
                     <Popconfirm
-                      title="确定要清除所有长期记忆吗？"
+                      title="确定要清除当前选中身份的长期记忆吗？"
                       onConfirm={handleClearMemories}
                       okText="确定"
                       cancelText="取消"
                     >
                       <Button icon={<DeleteOutlined />} danger disabled={config?.long_term_strategy === 'external'}>
-                        清除所有记忆
+                        清除当前身份记忆
                       </Button>
                     </Popconfirm>
                   </Space>

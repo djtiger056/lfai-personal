@@ -21,10 +21,9 @@ from ..mcp import MCPManager
 from ..emote import EmoteManager, EmoteConfig
 from ..agent_delegate import AgentDelegator, extract_delegate_tag
 from ..agent_delegate.config import AgentDelegateConfig
-from ..user import user_manager
-from ..user.data_manager import user_data_manager
 from ..utils.config_merger import config_merger
 from ..utils.datetime_utils import get_now, from_isoformat
+from ..utils.companion_identity import normalize_companion_memory_scope
 from .gen_img_parser import extract_gen_img_prompt
 from .gen_video_parser import extract_gen_video_prompt
 from .tts_tag_parser import extract_tts_tag
@@ -116,7 +115,6 @@ class Bot:
         except Exception as e:
             print(f"视频生成初始化失败: {str(e)}")
         self.video_base_image_service = BaseImageService(
-            user_data_manager=user_data_manager,
             fallback_image_path=config.get("image_generation", {}).get(
                 "default_base_image_path", "backend/data/default_base_image.jpg"
             ),
@@ -201,18 +199,26 @@ class Bot:
         system_prompt = self._get_user_system_prompt(user_id)
         self._history_manager.trim(session_id, self._history_limit(), system_prompt)
 
+    def _get_memory_scope(self, user_id: str, session_id: Optional[str] = None) -> tuple[str, str]:
+        return normalize_companion_memory_scope(user_id, session_id)
+
+    def _get_memory_session_history(self, user_id: str, session_id: Optional[str] = None) -> List[Dict[str, str]]:
+        memory_user_id, memory_session_id = self._get_memory_scope(user_id, session_id)
+        system_prompt = self._get_user_system_prompt(memory_user_id)
+        return self._history_manager.get_session_history(memory_session_id, system_prompt)
+
     async def _load_history_from_memory(self, user_id: str, session_id: Optional[str] = None):
         """从持久化存储中恢复短期对话历史，避免重启丢失上下文"""
         if not self.memory_manager:
             return
-        session_id = session_id or user_id
+        memory_user_id, memory_session_id = self._get_memory_scope(user_id, session_id)
         if not await self._ensure_memory_manager_initialized():
             return
         await self._history_manager.load_from_memory(
-            user_id=user_id,
-            session_id=session_id,
+            user_id=memory_user_id,
+            session_id=memory_session_id,
             memory_manager=self.memory_manager,
-            system_prompt=self.system_prompt or "",
+            system_prompt=self._get_user_system_prompt(memory_user_id),
             limit=self._history_limit(),
         )
 
@@ -280,6 +286,8 @@ class Bot:
         if not self.memory_manager or not await self._ensure_memory_manager_initialized():
             return
 
+        memory_user_id, memory_session_id = self._get_memory_scope(user_id, session_id)
+
         count = config.memory_config.mid_term_context_count
         if count <= 0:
             return
@@ -288,8 +296,8 @@ class Bot:
 
         try:
             summaries = await self.memory_manager.get_mid_term_summaries(
-                user_id=user_id,
-                session_id=session_id,
+                user_id=memory_user_id,
+                session_id=memory_session_id,
                 limit=count
             )
         except Exception as e:
@@ -606,13 +614,15 @@ class Bot:
                 self.logger.debug("跳过空助手回复，不写入记忆")
                 return
 
+            memory_user_id, memory_session_id = self._get_memory_scope(user_id, session_id)
+
             # 添加用户消息
             user_msg = ConversationMessage(
                 role="user",
                 content=memory_user_message,
                 timestamp=get_now()
             )
-            await self.memory_manager.add_short_term_memory(user_id, session_id, user_msg)
+            await self.memory_manager.add_short_term_memory(memory_user_id, memory_session_id, user_msg)
             
             # 添加助手回复
             assistant_msg = ConversationMessage(
@@ -620,7 +630,7 @@ class Bot:
                 content=memory_assistant_response,
                 timestamp=get_now()
             )
-            await self.memory_manager.add_short_term_memory(user_id, session_id, assistant_msg)
+            await self.memory_manager.add_short_term_memory(memory_user_id, memory_session_id, assistant_msg)
         except Exception as e:
             print(f"添加对话到记忆失败: {e}")
     
@@ -686,32 +696,14 @@ class Bot:
             return None
 
     async def _get_user_preferences_for_update(self, user_id: str) -> Optional[Dict[str, Any]]:
-        user = await self._resolve_config_user(user_id)
-        if not user:
-            return None
-        try:
-            cfg = await user_manager.get_user_config_dict(user.id)
-        except Exception as e:
-            self.logger.warning(f"读取用户配置失败 user_id={user_id}: {e}")
-            return None
-        prefs = cfg.get("preferences") if isinstance(cfg, dict) else {}
-        return dict(prefs or {})
+        prefs = config.get("preferences", {}) or {}
+        return dict(prefs) if isinstance(prefs, dict) else {}
 
     async def _update_user_preferences(self, user_id: str, preferences: Dict[str, Any]) -> bool:
-        user = await self._resolve_config_user(user_id)
-        if not user:
-            return False
-        success = await user_manager.update_user_config(user.id, {"preferences": preferences})
-        if success:
-            self.invalidate_user_cache(str(user_id))
-            try:
-                from backend.adapters.linyu_manager import get_linyu_session_manager
-                manager = get_linyu_session_manager()
-                if manager:
-                    manager.request_refresh_user(str(user_id))
-            except Exception:
-                pass
-        return success
+        config.update_config("preferences", preferences)
+        config.refresh_from_file()
+        self.invalidate_user_cache(str(user_id))
+        return True
 
     async def _get_roleplay_message_index(self, memory_manager: Optional[MemoryManager], user_id: str, session_id: str) -> int:
         if not memory_manager:
@@ -1199,7 +1191,7 @@ class Bot:
 
             # 恢复最近的对话历史作为短期上下文
             await self._load_history_from_memory(user_id, session_id)
-            history = self._get_session_history(session_id, user_id)
+            history = self._get_memory_session_history(user_id, session_id)
 
             # 获取相关记忆（长期记忆）作为上下文
             relevant_memories = []
@@ -1232,7 +1224,8 @@ class Bot:
             })
             
             # 保持历史记录在合理范围内
-            self._trim_conversation_history(session_id)
+            _, memory_session_id = self._get_memory_scope(user_id, session_id)
+            self._trim_conversation_history(memory_session_id, user_id)
             
             # 将对话添加到记忆系统
             await self._add_conversation_to_memory(user_id, session_id, message, response)
@@ -1335,7 +1328,7 @@ class Bot:
 
             # 恢复最近的对话历史作为短期上下文
             await self._load_history_from_memory(user_id, session_id)
-            history = self._get_session_history(session_id, user_id)
+            history = self._get_memory_session_history(user_id, session_id)
             mark("history_loaded")
 
             # 获取相关记忆（长期记忆）作为上下文
@@ -1439,7 +1432,8 @@ class Bot:
             })
 
             # 保持历史记录在合理范围内
-            self._trim_conversation_history(session_id)
+            _, memory_session_id = self._get_memory_scope(user_id, session_id)
+            self._trim_conversation_history(memory_session_id, user_id)
 
             # 将对话添加到记忆系统
             await self._add_conversation_to_memory(user_id, session_id, message, full_response)
@@ -1473,7 +1467,7 @@ class Bot:
                 return await self._generate_roleplay_proactive_reply(user_id, session_id)
 
             await self._load_history_from_memory(user_id, session_id)
-            history = self._get_session_history(session_id, user_id)
+            history = self._get_memory_session_history(user_id, session_id)
 
             relevant_memories = []
             if self.memory_manager:
@@ -1495,7 +1489,8 @@ class Bot:
                 "content": response,
                 "timestamp": get_now().isoformat()
             })
-            self._trim_conversation_history(session_id)
+            _, memory_session_id = self._get_memory_scope(user_id, session_id)
+            self._trim_conversation_history(memory_session_id, user_id)
 
             await self._record_proactive_memory(user_id, response)
             return response
@@ -1512,12 +1507,13 @@ class Bot:
             return
         try:
             from ..memory.models import ConversationMessage
+            memory_user_id, memory_session_id = self._get_memory_scope(user_id, user_id)
             msg = ConversationMessage(
                 role="assistant",
                 content=self._sanitize_for_memory(assistant_response),
                 timestamp=get_now()
             )
-            await self.memory_manager.add_short_term_memory(user_id, user_id, msg)
+            await self.memory_manager.add_short_term_memory(memory_user_id, memory_session_id, msg)
         except Exception as e:
             print(f"记录主动对话到记忆失败: {e}")
 
@@ -1733,10 +1729,11 @@ class Bot:
             reminder_data = await detector.detect_reminder_intent(message)
 
             if reminder_data:
+                memory_user_id, memory_session_id = self._get_memory_scope(user_id, session_id)
                 # 创建待办事项
                 success = await self.memory_manager.add_reminder(
-                    user_id=user_id,
-                    session_id=session_id,
+                    user_id=memory_user_id,
+                    session_id=memory_session_id,
                     content=reminder_data.get("content", ""),
                     trigger_time=reminder_data.get("trigger_time"),
                     original_message=message,
@@ -1786,12 +1783,14 @@ class Bot:
     def clear_history(self, session_id: str = "default", user_id: str = "default"):
         """清空指定会话的对话历史"""
         system_prompt = self._get_user_system_prompt(user_id)
-        self._history_manager.clear(session_id, system_prompt)
+        _, memory_session_id = self._get_memory_scope(user_id, session_id)
+        self._history_manager.clear(memory_session_id, system_prompt)
     
     def get_history(self, session_id: str = "default", user_id: str = "default") -> List[Dict[str, str]]:
         """获取指定会话的对话历史"""
         system_prompt = self._get_user_system_prompt(user_id)
-        return self._history_manager.get_copy(session_id, system_prompt)
+        _, memory_session_id = self._get_memory_scope(user_id, session_id)
+        return self._history_manager.get_copy(memory_session_id, system_prompt)
     
     def should_generate_image(self, message: str, user_id: str = "default") -> Optional[str]:
         """检查是否应该生成图像
@@ -1882,13 +1881,14 @@ class Bot:
 
         short_prompt = self._sanitize_for_memory(prompt, max_length=160)
         note = f"[图片生成] 提示词：{short_prompt}"
-        history = self._get_session_history(session_id, user_id)
+        history = self._get_memory_session_history(user_id, session_id)
         history.append({
             "role": "assistant",
             "content": note,
             "timestamp": get_now().isoformat()
         })
-        self._trim_conversation_history(session_id, user_id)
+        _, memory_session_id = self._get_memory_scope(user_id, session_id)
+        self._trim_conversation_history(memory_session_id, user_id)
 
         try:
             await self._add_conversation_to_memory(
@@ -2004,13 +2004,14 @@ class Bot:
 
         short_prompt = self._sanitize_for_memory(prompt, max_length=160)
         note = f"[视频生成] 提示词：{short_prompt}\n视频地址：{video_url}"
-        history = self._get_session_history(session_id, user_id)
+        history = self._get_memory_session_history(user_id, session_id)
         history.append({
             "role": "assistant",
             "content": note,
             "timestamp": get_now().isoformat()
         })
-        self._trim_conversation_history(session_id, user_id)
+        _, memory_session_id = self._get_memory_scope(user_id, session_id)
+        self._trim_conversation_history(memory_session_id, user_id)
 
         try:
             await self._add_conversation_to_memory(

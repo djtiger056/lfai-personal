@@ -79,13 +79,14 @@ async def test_bind_linyu_resolves_account_before_update(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bound_user_can_bypass_auto_bound_target_lock(monkeypatch):
+async def test_linyu_target_user_accepts_only_configured_registry_target(monkeypatch):
     adapter = LinyuAdapter.__new__(LinyuAdapter)
+    adapter.companion_id = ""
+    adapter.companion_name = ""
+    adapter.ai_account_id = ""
+    adapter.allowed_user_ids = set()
     adapter.user_id = None
-    adapter.target_user_id = "old-target"
-    adapter.target_user_account = ""
-    adapter.auto_bind_first_user = True
-    adapter._has_explicit_target = False
+    adapter.target_user_id = "target-user"
     adapter.access_control_enabled = True
     adapter.access_control_mode = "whitelist"
     adapter.access_whitelist = set()
@@ -108,7 +109,7 @@ async def test_bound_user_can_bypass_auto_bound_target_lock(monkeypatch):
 
     await adapter._handle_private_message(
         {
-            "fromId": "new-user",
+            "fromId": "target-user",
             "id": "msg-1",
             "msgContent": {
                 "type": "text",
@@ -117,19 +118,55 @@ async def test_bound_user_can_bypass_auto_bound_target_lock(monkeypatch):
         }
     )
 
-    assert "new-user" in adapter.access_whitelist
-    adapter._handle_text_message.assert_awaited_once_with("new-user", "hello")
+    assert "target-user" in adapter.access_whitelist
+    adapter._handle_text_message.assert_awaited_once_with("target-user", "hello")
 
 
 @pytest.mark.asyncio
-async def test_global_linyu_session_maps_bound_sender_to_project_user(monkeypatch):
+async def test_linyu_target_user_ignores_non_target_before_registry_update():
     adapter = LinyuAdapter.__new__(LinyuAdapter)
-    adapter.owner_user_id = None
+    adapter.companion_id = ""
+    adapter.companion_name = ""
+    adapter.ai_account_id = ""
+    adapter.allowed_user_ids = set()
+    adapter.user_id = None
+    adapter.target_user_id = "target-user"
+    adapter.access_control_enabled = True
+    adapter.access_control_mode = "whitelist"
+    adapter.access_whitelist = set()
+    adapter.access_deny_message = "denied"
+
+    adapter._try_resolve_linyu_binding = AsyncMock()
+    adapter._get_bound_linyu_user = AsyncMock()
+    adapter._handle_text_message = AsyncMock()
+    adapter.send_private_message = AsyncMock()
+
+    await adapter._handle_private_message(
+        {
+            "fromId": "other-user",
+            "id": "msg-other",
+            "msgContent": {
+                "type": "text",
+                "content": "hello",
+            },
+        }
+    )
+
+    adapter._try_resolve_linyu_binding.assert_not_awaited()
+    adapter._get_bound_linyu_user.assert_not_awaited()
+    adapter._handle_text_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_companion_linyu_session_maps_bound_sender_to_companion_identity(monkeypatch):
+    adapter = LinyuAdapter.__new__(LinyuAdapter)
+    adapter.owner_user_id = "companion:1"
+    adapter.companion_id = "companion:1"
+    adapter.companion_name = "小雨"
+    adapter.ai_account_id = "1"
+    adapter.allowed_user_ids = {"d8ba2701-5c71-43c1-809c-d1bbfc57b3f3"}
     adapter.user_id = "ai-user"
     adapter.target_user_id = ""
-    adapter.target_user_account = ""
-    adapter.auto_bind_first_user = False
-    adapter._has_explicit_target = False
     adapter.access_control_enabled = True
     adapter.access_control_mode = "whitelist"
     adapter.access_whitelist = set()
@@ -162,7 +199,8 @@ async def test_global_linyu_session_maps_bound_sender_to_project_user(monkeypatc
         }
     )
 
-    assert adapter._get_bot_user_id("d8ba2701-5c71-43c1-809c-d1bbfc57b3f3") == "18"
+    assert adapter._get_bot_user_id("d8ba2701-5c71-43c1-809c-d1bbfc57b3f3") == "companion:1"
+    assert adapter._get_bot_session_id("d8ba2701-5c71-43c1-809c-d1bbfc57b3f3") == "companion_session:1:linyu:d8ba2701-5c71-43c1-809c-d1bbfc57b3f3"
     assert "d8ba2701-5c71-43c1-809c-d1bbfc57b3f3" in adapter.access_whitelist
     adapter._handle_text_message.assert_awaited_once_with(
         "d8ba2701-5c71-43c1-809c-d1bbfc57b3f3",
@@ -171,14 +209,15 @@ async def test_global_linyu_session_maps_bound_sender_to_project_user(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_global_owner_id_does_not_hide_bound_project_user(monkeypatch):
+async def test_companion_linyu_session_ignores_unbound_sender(monkeypatch):
     adapter = LinyuAdapter.__new__(LinyuAdapter)
-    adapter.owner_user_id = "global"
+    adapter.owner_user_id = "companion:1"
+    adapter.companion_id = "companion:1"
+    adapter.companion_name = "小雨"
+    adapter.ai_account_id = "1"
+    adapter.allowed_user_ids = {"bound-user"}
     adapter.user_id = "ai-user"
     adapter.target_user_id = ""
-    adapter.target_user_account = ""
-    adapter.auto_bind_first_user = False
-    adapter._has_explicit_target = False
     adapter.access_control_enabled = True
     adapter.access_control_mode = "whitelist"
     adapter.access_whitelist = set()
@@ -187,22 +226,12 @@ async def test_global_owner_id_does_not_hide_bound_project_user(monkeypatch):
 
     adapter._try_resolve_linyu_binding = AsyncMock()
     adapter._get_bound_linyu_user = AsyncMock(return_value=SimpleNamespace(id=18))
-    adapter._is_message_processed = lambda msg_id: False
-    adapter._deliver_follow_up_message = lambda conversation_key, message_text: False
-    adapter._get_conversation_key = lambda target_id, is_group=False, user_id=None: f"linyu_user_{target_id}"
     adapter._handle_text_message = AsyncMock()
     adapter.send_private_message = AsyncMock()
-    adapter._mark_read = AsyncMock()
-
-    def fake_create_task(coro):
-        coro.close()
-        return None
-
-    monkeypatch.setattr("backend.adapters.linyu.asyncio.create_task", fake_create_task)
 
     await adapter._handle_private_message(
         {
-            "fromId": "d8ba2701-5c71-43c1-809c-d1bbfc57b3f3",
+            "fromId": "other-user",
             "id": "msg-3",
             "msgContent": {
                 "type": "text",
@@ -211,9 +240,6 @@ async def test_global_owner_id_does_not_hide_bound_project_user(monkeypatch):
         }
     )
 
-    assert adapter._get_bot_user_id("d8ba2701-5c71-43c1-809c-d1bbfc57b3f3") == "18"
-    assert "d8ba2701-5c71-43c1-809c-d1bbfc57b3f3" in adapter.access_whitelist
-    adapter._handle_text_message.assert_awaited_once_with(
-        "d8ba2701-5c71-43c1-809c-d1bbfc57b3f3",
-        "hello",
-    )
+    adapter._try_resolve_linyu_binding.assert_not_awaited()
+    adapter._get_bound_linyu_user.assert_not_awaited()
+    adapter._handle_text_message.assert_not_awaited()

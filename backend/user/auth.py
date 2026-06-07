@@ -3,7 +3,7 @@ import hashlib
 import jwt
 from datetime import timedelta
 from typing import Optional, Dict, Any
-from backend.config import config
+from backend.jwt_secret import get_jwt_secret_key
 from backend.utils.datetime_utils import get_now
 
 
@@ -16,10 +16,7 @@ class AuthManager:
     @staticmethod
     def _get_secret_key() -> str:
         """获取 JWT 密钥（每次从配置读取，支持热更新）"""
-        key = config.get('jwt_secret_key', 'your-secret-key-change-this-in-production')
-        if not key or not isinstance(key, str):
-            key = 'your-secret-key-change-this-in-production'
-        return key
+        return get_jwt_secret_key()
 
     @staticmethod
     def hash_password(password: str) -> str:

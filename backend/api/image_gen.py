@@ -6,10 +6,9 @@ import base64
 from ..core.bot import Bot
 from backend.api.deps import get_access_token
 from backend.api.bot_provider import get_bot
-from backend.user.auth import auth_manager
-from backend.user.data_manager import user_data_manager
 from backend.image_gen.base_image_service import BaseImageService
 from backend.config import config as app_config
+from backend.personal_auth import require_personal_auth
 
 
 router = APIRouter(prefix="/api/image-gen", tags=["图像生成"])
@@ -18,7 +17,7 @@ router = APIRouter(prefix="/api/image-gen", tags=["图像生成"])
 _fallback_path = app_config.get("image_generation", {}).get(
     "default_base_image_path", "backend/data/default_base_image.jpg"
 )
-base_image_service = BaseImageService(user_data_manager, _fallback_path)
+base_image_service = BaseImageService(fallback_image_path=_fallback_path)
 
 
 class ImageGenConfigRequest(BaseModel):
@@ -32,6 +31,7 @@ class ImageGenConfigRequest(BaseModel):
     kling_api: Dict[str, Any] = {}
     image_api: Dict[str, Any] = {}
     gpt_image: Dict[str, Any] = {}
+    gpt_image_edits: Dict[str, Any] = {}
     trigger_keywords: list = []
     generating_message: str = "🎨 正在为你生成图片，请稍候..."
     error_message: str = "😢 图片生成失败：{error}"
@@ -104,11 +104,6 @@ async def generate_image(
     """生成图像"""
     try:
         effective_user_id = request.user_id or "web_image_user"
-        if token:
-            user_info = auth_manager.get_user_from_token(token)
-            if user_info:
-                # 优先使用 username（底图按 username 存储）
-                effective_user_id = user_info.get("username") or str(user_info.get("qq_user_id") or user_info.get("user_id") or effective_user_id)
 
         image_data = await bot.generate_image(request.prompt, user_id=effective_user_id)
         if image_data:
@@ -126,19 +121,7 @@ async def test_connection(
 ):
     """测试图像生成连接"""
     try:
-        # 非管理员使用用户级配置测试；管理员用全局配置
-        user_id = None
-        if token:
-            user_info = auth_manager.get_user_from_token(token)
-            if user_info:
-                current_user_id = user_info.get("user_id") or user_info.get("id")
-                if current_user_id:
-                    from backend.user import user_manager
-                    user = await user_manager.get_user_by_id(int(current_user_id))
-                    if not user or not getattr(user, "is_admin", 0):
-                        user_id = str(current_user_id)
-
-        success = await bot.test_image_gen_connection(user_id=user_id or None)
+        success = await bot.test_image_gen_connection(user_id=None)
         return {"success": success, "message": "连接成功" if success else "连接失败"}
     except Exception as e:
         return {"success": False, "message": f"连接测试失败：{str(e)}"}
@@ -147,23 +130,9 @@ async def test_connection(
 # ============ 底图管理端点 ============
 
 
-def _get_authenticated_username(token: str) -> str:
-    """从 token 中获取已认证的用户名，未认证则抛出 401。"""
-    if not token:
-        raise HTTPException(status_code=401, detail="未授权")
-    user_info = auth_manager.get_user_from_token(token)
-    if not user_info:
-        raise HTTPException(status_code=401, detail="未授权")
-    username = user_info.get("username")
-    if not username:
-        raise HTTPException(status_code=401, detail="未授权")
-    return username
-
-
-@router.post("/base-image/upload", response_model=BaseImageUploadResponse)
+@router.post("/base-image/upload", response_model=BaseImageUploadResponse, dependencies=[Depends(require_personal_auth)])
 async def upload_base_image(
     file: UploadFile = File(...),
-    token: str = Depends(get_access_token),
 ):
     """上传用户底图（multipart 文件上传）。
 
@@ -171,8 +140,6 @@ async def upload_base_image(
     - 大小限制：≤5MB
     - 每用户最多一张，新上传会替换旧底图
     """
-    username = _get_authenticated_username(token)
-
     # 读取文件内容
     file_data = await file.read()
 
@@ -195,7 +162,7 @@ async def upload_base_image(
 
     # 调用服务上传
     try:
-        result = await base_image_service.upload_base_image(username, file_data, filename)
+        result = await base_image_service.upload_base_image("personal", file_data, filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -208,14 +175,10 @@ async def upload_base_image(
     )
 
 
-@router.get("/base-image", response_model=BaseImageGetResponse)
-async def get_base_image(
-    token: str = Depends(get_access_token),
-):
+@router.get("/base-image", response_model=BaseImageGetResponse, dependencies=[Depends(require_personal_auth)])
+async def get_base_image():
     """获取当前用户底图（Base64 编码）及元数据。"""
-    username = _get_authenticated_username(token)
-
-    result = await base_image_service.get_base_image(username)
+    result = await base_image_service.get_base_image("personal")
     if result is None:
         raise HTTPException(status_code=404, detail="未上传底图")
 
@@ -230,14 +193,10 @@ async def get_base_image(
     )
 
 
-@router.delete("/base-image")
-async def delete_base_image(
-    token: str = Depends(get_access_token),
-):
+@router.delete("/base-image", dependencies=[Depends(require_personal_auth)])
+async def delete_base_image():
     """删除当前用户底图。"""
-    username = _get_authenticated_username(token)
-
-    deleted = await base_image_service.delete_base_image(username)
+    deleted = await base_image_service.delete_base_image("personal")
     if not deleted:
         raise HTTPException(status_code=404, detail="未上传底图")
 

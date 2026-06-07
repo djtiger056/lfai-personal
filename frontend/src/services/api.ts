@@ -39,12 +39,19 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // Token 过期或无效，清除本地存储并跳转登录页
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
-      // 如果不在登录页，则跳转
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login'
+      const requestUrl = String(error.config?.url || '')
+      const hasToken = Boolean(localStorage.getItem('token'))
+      const isAuthRequest =
+        requestUrl.includes('/auth/status') ||
+        requestUrl.includes('/auth/verify') ||
+        requestUrl.includes('/auth/login')
+
+      if (hasToken && !isAuthRequest) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login'
+        }
       }
     }
     return Promise.reject(error)
@@ -63,6 +70,101 @@ const getCurrentUserId = (): string => {
     console.error('获取用户ID失败:', e)
   }
   return 'web_user'
+}
+
+export type ExternalAccount = {
+  id: number
+  platform: 'qq' | 'linyu'
+  account_name: string
+  remote_user_id: string
+  display_name: string
+  enabled: boolean
+  metadata?: Record<string, any>
+}
+
+export type LinyuAIAccount = {
+  id: number
+  companion_name: string
+  account_name: string
+  account?: string
+  remote_user_id?: string
+  password?: string
+  enabled: boolean
+  metadata?: Record<string, any>
+  bound_account_ids?: number[]
+  bound_accounts?: ExternalAccount[]
+  companion_id?: string
+  platform_accounts?: Array<{
+    id?: number
+    companion_id?: number
+    platform: 'qq' | 'linyu'
+    account_name: string
+    remote_user_id?: string
+    password?: string
+    enabled: boolean
+    is_primary?: boolean
+    metadata?: Record<string, any>
+  }>
+}
+
+export const accountsApi = {
+  listAccounts: async (params?: { platform?: 'qq' | 'linyu'; enabled?: boolean }): Promise<ExternalAccount[]> => {
+    const response = await api.get('/accounts', { params })
+    return Array.isArray(response.data?.accounts) ? response.data.accounts : []
+  },
+  createAccount: async (data: Partial<ExternalAccount> & { platform: 'qq' | 'linyu'; account_name: string }): Promise<ExternalAccount> => {
+    const response = await api.post('/accounts', data)
+    return response.data
+  },
+  updateAccount: async (id: number, data: Partial<ExternalAccount>): Promise<ExternalAccount> => {
+    const response = await api.put(`/accounts/${id}`, data)
+    return response.data
+  },
+  deleteAccount: async (id: number): Promise<void> => {
+    await api.delete(`/accounts/${id}`)
+  },
+  resolveLinyuAccount: async (accountName: string): Promise<{ account_name: string; remote_user_id: string; display_name: string }> => {
+    const response = await api.post('/accounts/resolve/linyu', { account_name: accountName })
+    return response.data
+  },
+  listLinyuAIAccounts: async (params?: { enabled?: boolean }): Promise<LinyuAIAccount[]> => {
+    const response = await api.get('/ai-accounts/linyu', { params })
+    return Array.isArray(response.data?.accounts) ? response.data.accounts : []
+  },
+  listCompanions: async (params?: { enabled?: boolean }): Promise<LinyuAIAccount[]> => {
+    const response = await api.get('/companions', { params })
+    return Array.isArray(response.data?.companions) ? response.data.companions : []
+  },
+  createCompanion: async (data: Partial<LinyuAIAccount> & { companion_name: string }): Promise<LinyuAIAccount> => {
+    const response = await api.post('/companions', data)
+    return response.data
+  },
+  updateCompanion: async (id: number, data: Partial<LinyuAIAccount>): Promise<LinyuAIAccount> => {
+    const response = await api.put(`/companions/${id}`, data)
+    return response.data
+  },
+  updateCompanionBindings: async (id: number, userAccountIds: number[]): Promise<LinyuAIAccount> => {
+    const response = await api.put(`/companions/${id}/bindings`, { user_account_ids: userAccountIds })
+    return response.data
+  },
+  deleteCompanion: async (id: number): Promise<void> => {
+    await api.delete(`/companions/${id}`)
+  },
+  createLinyuAIAccount: async (data: Partial<LinyuAIAccount> & { account_name: string }): Promise<LinyuAIAccount> => {
+    const response = await api.post('/ai-accounts/linyu', data)
+    return response.data
+  },
+  updateLinyuAIAccount: async (id: number, data: Partial<LinyuAIAccount>): Promise<LinyuAIAccount> => {
+    const response = await api.put(`/ai-accounts/linyu/${id}`, data)
+    return response.data
+  },
+  updateLinyuAIBindings: async (id: number, userAccountIds: number[]): Promise<LinyuAIAccount> => {
+    const response = await api.put(`/ai-accounts/linyu/${id}/bindings`, { user_account_ids: userAccountIds })
+    return response.data
+  },
+  deleteLinyuAIAccount: async (id: number): Promise<void> => {
+    await api.delete(`/ai-accounts/linyu/${id}`)
+  },
 }
 
 export const configApi = {
@@ -659,8 +761,15 @@ export const memoryApi = {
       selector_key?: string
       channel?: string
       default_session_id?: string
+      memory_user_id?: string
+      memory_session_id?: string
       remote_user_id?: string
       project_user_id?: string
+      companion_id?: string
+      companion_name?: string
+      ai_account_id?: string
+      ai_account_name?: string
+      user_account_name?: string
     }[]
   }> => {
     try {
@@ -763,22 +872,24 @@ export const proactiveApi = {
 // 提示词系统 API（人设 + 功能协议，独立于 userConfigApi）
 export const promptApi = {
   // ── 人设提示词 ──────────────────────────────────────────────────
-  getPrompt: async (): Promise<{ content: string; is_custom: boolean; updated_at?: string; source: string }> => {
-    const response = await api.get('/prompt')
+  getPrompt: async (companionId?: string): Promise<{ content: string; is_custom: boolean; updated_at?: string; source: string }> => {
+    const response = await api.get('/prompt', { params: companionId ? { companion_id: companionId } : {} })
     return response.data
   },
-  updatePrompt: async (content: string, summary = ''): Promise<void> => {
-    await api.put('/prompt', { content, source: 'user', summary })
+  updatePrompt: async (content: string, summary = '', companionId?: string): Promise<void> => {
+    await api.put('/prompt', { content, source: 'user', summary }, { params: companionId ? { companion_id: companionId } : {} })
   },
-  resetPrompt: async (): Promise<void> => {
-    await api.delete('/prompt')
+  resetPrompt: async (companionId?: string): Promise<void> => {
+    await api.delete('/prompt', { params: companionId ? { companion_id: companionId } : {} })
   },
   getDefaultPrompt: async (): Promise<string> => {
     const response = await api.get('/prompt/default')
     return response.data.content
   },
-  getPromptHistory: async (limit = 20): Promise<any[]> => {
-    const response = await api.get('/prompt/history', { params: { limit } })
+  getPromptHistory: async (limit = 20, companionId?: string): Promise<any[]> => {
+    const response = await api.get('/prompt/history', {
+      params: companionId ? { limit, companion_id: companionId } : { limit },
+    })
     return response.data.records
   },
 
@@ -787,11 +898,15 @@ export const promptApi = {
     const response = await api.get('/prompt/rules')
     return response.data
   },
-  updateRules: async (content: string): Promise<void> => {
-    await api.put('/prompt/rules', { content, source: 'user' })
+  getCompanionRules: async (companionId?: string): Promise<{ content: string; is_custom: boolean }> => {
+    const response = await api.get('/prompt/rules', { params: companionId ? { companion_id: companionId } : {} })
+    return response.data
   },
-  resetRules: async (): Promise<void> => {
-    await api.delete('/prompt/rules')
+  updateRules: async (content: string, companionId?: string): Promise<void> => {
+    await api.put('/prompt/rules', { content, source: 'user' }, { params: companionId ? { companion_id: companionId } : {} })
+  },
+  resetRules: async (companionId?: string): Promise<void> => {
+    await api.delete('/prompt/rules', { params: companionId ? { companion_id: companionId } : {} })
   },
   getDefaultRules: async (): Promise<string> => {
     const response = await api.get('/prompt/rules/default')
@@ -1031,9 +1146,12 @@ export const userConfigApi = {
 
 // 用户认证 API
 export const authApi = {
-  // 登录
   login: async (username: string, password: string): Promise<{ access_token: string; user: any }> => {
-    const response = await api.post('/auth/login', { username, password })
+    const response = await api.post('/auth/verify', { username, password })
+    return response.data
+  },
+  verify: async (username: string, password: string): Promise<{ access_token: string; user: any }> => {
+    const response = await api.post('/auth/verify', { username, password })
     return response.data
   },
 
@@ -1044,8 +1162,7 @@ export const authApi = {
     nickname?: string
     qq_user_id?: string
   }): Promise<any> => {
-    const response = await api.post('/auth/register', data)
-    return response.data
+    return data
   },
 
   // 获取当前用户信息

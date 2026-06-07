@@ -58,6 +58,12 @@ interface ImageApiConfig {
   ratio: string;
   resolution: string;
   sample_strength: number;
+  negative_prompt: string;
+  intelligent_ratio: boolean;
+  response_format: string;
+  n: number;
+  provider_options: Record<string, any>;
+  provider_options_text?: string;
 }
 
 interface GptImageConfig {
@@ -65,6 +71,19 @@ interface GptImageConfig {
   api_key: string;
   model: string;
   timeout: number;
+}
+
+interface GptImageEditsConfig {
+  api_base: string;
+  api_key: string;
+  model: string;
+  timeout: number;
+  ratio: string;
+  resolution: string;
+  quality: string;
+  background: string;
+  moderation: string;
+  response_format: string;
 }
 
 interface ImageGenConfig {
@@ -77,6 +96,7 @@ interface ImageGenConfig {
   kling_api: KlingApiConfig;
   image_api: ImageApiConfig;
   gpt_image: GptImageConfig;
+  gpt_image_edits: GptImageEditsConfig;
   trigger_keywords: string[];
   generating_message: string;
   error_message: string;
@@ -87,9 +107,25 @@ const providerOptions = [
   { value: 'modelscope', label: '魔搭社区' },
   { value: 'yunwu', label: 'yunwu.ai' },
   { value: 'kling_api', label: '本地 kling-api' },
-  { value: 'image_api', label: 'Image API (即梦/豆包/小云雀)' },
+  { value: 'image_api', label: 'Images API (图片/Seedream)' },
   { value: 'gpt_image', label: 'GPT-Image (图生图中转站)' },
+  { value: 'gpt_image_edits', label: 'GPT-Image Edits (gpt-image-2)' },
 ];
+
+const stringifyJsonObject = (value: any) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  return JSON.stringify(value, null, 2);
+};
+
+const parseJsonObject = (value?: string) => {
+  const text = String(value || '').trim();
+  if (!text) return {};
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('provider_options 必须是 JSON 对象');
+  }
+  return parsed;
+};
 
 const ImageGenPage: React.FC = () => {
   const [form] = Form.useForm();
@@ -125,19 +161,37 @@ const ImageGenPage: React.FC = () => {
       response_format: 'url',
     },
     image_api: {
-      api_base: 'http://127.0.0.1:18081',
+      api_base: 'http://127.0.0.1:8006',
       api_key: '',
-      model: 'doubao-seedream-4.5',
+      model: 'seedream-5.0',
       timeout: 120,
       ratio: '1:1',
       resolution: '2k',
       sample_strength: 0.5,
+      negative_prompt: '',
+      intelligent_ratio: false,
+      response_format: 'url',
+      n: 1,
+      provider_options: {},
+      provider_options_text: '',
     },
     gpt_image: {
       api_base: '',
       api_key: '',
       model: 'gpt-image-2',
       timeout: 180,
+    },
+    gpt_image_edits: {
+      api_base: 'https://jeniya.top',
+      api_key: '',
+      model: 'gpt-image-2-all',
+      timeout: 180,
+      ratio: '1:1',
+      resolution: '1k',
+      quality: '',
+      background: '',
+      moderation: '',
+      response_format: 'url',
     },
     trigger_keywords: ['画', '生成图片', '生图', '绘制'],
     generating_message: '🎨 正在为你生成图片，请稍候...',
@@ -154,14 +208,18 @@ const ImageGenPage: React.FC = () => {
   const yunwuModels = ['jimeng-4.5', 'stable-diffusion-xl', 'dall-e-3'];
   const klingModels = ['kling-v2-1'];
   const imageApiModels = [
+    // 统一 Seedream
+    'seedream-5.0', 'seedream-4.5', 'seedream-4.0',
     // Doubao（豆包）
-    'doubao-seedream-4.5', 'doubao-seedream-4.0', 'doubao-seedream-3.0',
+    'doubao-seedream-5.0-lite', 'doubao-seedream-4.5', 'doubao-seedream-4.0',
     // XYQ（小云雀）
     'xyq-seedream-5.0', 'xyq-seedream-4.5', 'xyq-seedream-4.0',
     // Jimeng（即梦）
-    'jimeng-5.0', 'jimeng-4.6', 'jimeng-4.5',
+    'jimeng-5.0', 'jimeng-4.7', 'jimeng-4.6', 'jimeng-4.5', 'jimeng-4.1', 'jimeng-4.0',
     // Kling（可灵）
-    'kling-v2-1', 'kling-v3-omni', 'kling-image-o1',
+    'kling-v3-omni', 'kling-image-o1',
+    // Qwen/Wan（通义千问）
+    'wan2.7-image', 'qwen-image-2.0', 'qwen-image-1.0-pro', 'qwen-image-1.0',
   ];
   const currentProvider = Form.useWatch('provider', form) || 'modelscope';
 
@@ -190,8 +248,17 @@ const ImageGenPage: React.FC = () => {
     try {
       setLoading(true);
       const data = await imageGenConfigProxy.getConfig();
-      setConfig(data);
-      form.setFieldsValue(data);
+      const merged = {
+        ...config,
+        ...(data || {}),
+        image_api: {
+          ...config.image_api,
+          ...(data?.image_api || {}),
+          provider_options_text: stringifyJsonObject(data?.image_api?.provider_options),
+        },
+      };
+      setConfig(merged);
+      form.setFieldsValue(merged);
     } catch (error) {
       message.error('加载配置失败');
     } finally {
@@ -202,11 +269,19 @@ const ImageGenPage: React.FC = () => {
   const saveConfig = async (values: ImageGenConfig) => {
     try {
       setLoading(true);
-      await imageGenConfigProxy.updateConfig(values);
+      const payload: ImageGenConfig = {
+        ...values,
+        image_api: {
+          ...values.image_api,
+          provider_options: parseJsonObject(values.image_api?.provider_options_text),
+        },
+      };
+      delete payload.image_api.provider_options_text;
+      await imageGenConfigProxy.updateConfig(payload);
       message.success('配置保存成功');
-      setConfig(values);
+      setConfig(payload);
     } catch (error) {
-      message.error('配置保存失败');
+      message.error(error instanceof Error ? error.message : '配置保存失败');
     } finally {
       setLoading(false);
     }
@@ -338,14 +413,14 @@ const ImageGenPage: React.FC = () => {
             showIcon
             style={{ marginBottom: 16 }}
             message="接入说明"
-            description="连接 Images API 统一服务，支持即梦、豆包、小云雀、可灵四大平台。通过切换模型名称选择不同平台。支持文生图和图生图。"
+            description="连接 Images API 统一服务，支持即梦、豆包、小云雀、可灵、通义千问，以及 Seedream 统一轮询模型。通过切换模型名称选择不同平台。支持文生图和图生图。"
           />
           <Form.Item
             name={['image_api', 'api_base']}
             label="API 地址"
             rules={[{ required: true, message: '请输入 API 地址' }]}
           >
-            <Input placeholder="http://127.0.0.1:18081" />
+            <Input placeholder="http://127.0.0.1:8006" />
           </Form.Item>
           <Form.Item name={['image_api', 'api_key']} label="API Key">
             <Input.Password placeholder="未开启鉴权可留空" />
@@ -362,6 +437,8 @@ const ImageGenPage: React.FC = () => {
                 else if (model.startsWith('xyq-')) label = `🐦 ${model}`;
                 else if (model.startsWith('jimeng-')) label = `✨ ${model}`;
                 else if (model.startsWith('kling-')) label = `🎬 ${model}`;
+                else if (model.startsWith('seedream-')) label = `统一 ${model}`;
+                else if (model.startsWith('qwen-') || model.startsWith('wan')) label = `千问 ${model}`;
                 return { value: model, label };
               })}
             />
@@ -376,6 +453,10 @@ const ImageGenPage: React.FC = () => {
                     { value: '9:16', label: '9:16' },
                     { value: '4:3', label: '4:3' },
                     { value: '3:4', label: '3:4' },
+                    { value: '3:2', label: '3:2' },
+                    { value: '2:3', label: '2:3' },
+                    { value: '21:9', label: '21:9' },
+                    { value: 'auto', label: 'auto' },
                   ]}
                 />
               </Form.Item>
@@ -403,6 +484,38 @@ const ImageGenPage: React.FC = () => {
             tooltip="值越大，生成图片越接近参考底图。范围 0.0-1.0"
           >
             <InputNumber min={0} max={1} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name={['image_api', 'n']} label="生成数量">
+                <InputNumber min={1} max={10} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['image_api', 'response_format']} label="响应格式">
+                <Select
+                  options={[
+                    { value: 'url', label: 'url' },
+                    { value: 'b64_json', label: 'b64_json' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['image_api', 'intelligent_ratio']} label="智能比例" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name={['image_api', 'negative_prompt']} label="反向提示词">
+            <Input.TextArea rows={2} placeholder="不希望出现的内容，可留空" />
+          </Form.Item>
+          <Form.Item
+            name={['image_api', 'provider_options_text']}
+            label="Provider Options（JSON）"
+            tooltip="透传给底层 provider 的额外参数，例如可灵网页模式 transport/target_url"
+          >
+            <Input.TextArea rows={4} placeholder={'{\n  "transport": "web",\n  "target_url": "https://klingai.com/app/image/new"\n}'} />
           </Form.Item>
         </>
       );
@@ -440,6 +553,126 @@ const ImageGenPage: React.FC = () => {
           </Form.Item>
           <Form.Item name={['gpt_image', 'timeout']} label="超时时间（秒）">
             <InputNumber min={30} max={600} style={{ width: '100%' }} />
+          </Form.Item>
+        </>
+      );
+    }
+
+    if (currentProvider === 'gpt_image_edits') {
+      return (
+        <>
+          <Divider>GPT-Image Edits 配置（gpt-image-2）</Divider>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="接入说明"
+            description="调用 /v1/images/edits multipart 接口，需要上传底图。前端选择 1K/2K/4K 后，后端会按比例转换为上游 size 参数。"
+          />
+          <Form.Item
+            name={['gpt_image_edits', 'api_base']}
+            label="API 地址"
+            rules={[{ required: true, message: '请输入 API 地址' }]}
+          >
+            <Input placeholder="https://jeniya.top" />
+          </Form.Item>
+          <Form.Item name={['gpt_image_edits', 'api_key']} label="API Key">
+            <Input.Password placeholder="Bearer Token，可按服务配置留空" />
+          </Form.Item>
+          <Form.Item
+            name={['gpt_image_edits', 'model']}
+            label="模型"
+            rules={[{ required: true, message: '请选择模型' }]}
+          >
+            <Select
+              options={[
+                { value: 'gpt-image-2-all', label: 'gpt-image-2-all' },
+                { value: 'gpt-image-2', label: 'gpt-image-2' },
+              ]}
+            />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name={['gpt_image_edits', 'ratio']} label="图片比例">
+                <Select
+                  options={[
+                    { value: '1:1', label: '1:1' },
+                    { value: '16:9', label: '16:9' },
+                    { value: '9:16', label: '9:16' },
+                    { value: '4:3', label: '4:3' },
+                    { value: '3:4', label: '3:4' },
+                    { value: '3:2', label: '3:2' },
+                    { value: '2:3', label: '2:3' },
+                    { value: '21:9', label: '21:9' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['gpt_image_edits', 'resolution']} label="分辨率">
+                <Select
+                  options={[
+                    { value: '1k', label: '1K' },
+                    { value: '2k', label: '2K' },
+                    { value: '4k', label: '4K' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['gpt_image_edits', 'timeout']} label="超时（秒）">
+                <InputNumber min={30} max={600} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name={['gpt_image_edits', 'response_format']} label="响应格式">
+                <Select
+                  options={[
+                    { value: 'url', label: 'url' },
+                    { value: 'b64_json', label: 'b64_json' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['gpt_image_edits', 'background']} label="背景">
+                <Select
+                  allowClear
+                  options={[
+                    { value: '', label: '默认' },
+                    { value: 'transparent', label: 'transparent' },
+                    { value: 'opaque', label: 'opaque' },
+                    { value: 'auto', label: 'auto' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name={['gpt_image_edits', 'moderation']} label="审核级别">
+                <Select
+                  allowClear
+                  options={[
+                    { value: '', label: '默认' },
+                    { value: 'auto', label: 'auto' },
+                    { value: 'low', label: 'low' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name={['gpt_image_edits', 'quality']} label="质量">
+            <Select
+              allowClear
+              options={[
+                { value: '', label: '默认' },
+                { value: 'auto', label: 'auto' },
+                { value: 'high', label: 'high' },
+                { value: 'medium', label: 'medium' },
+                { value: 'low', label: 'low' },
+              ]}
+            />
           </Form.Item>
         </>
       );
@@ -598,7 +831,7 @@ const ImageGenPage: React.FC = () => {
         </Col>
 
         <Col span={8}>
-          {(currentProvider === 'image_api' || currentProvider === 'gpt_image') && (
+          {(currentProvider === 'image_api' || currentProvider === 'gpt_image' || currentProvider === 'gpt_image_edits') && (
             <Card title="AI 伴侣底图" style={{ marginBottom: '16px' }} loading={baseImageLoading}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 {baseImage?.image_data ? (
